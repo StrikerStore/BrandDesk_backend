@@ -1,0 +1,36 @@
+{
+  "name": "helpdesk-backend",
+  "version": "1.0.0",
+  "description": "BrandDesk backend API",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "db:migrate": "node src/config/migrate.js",
+    "db:migrate:v2": "node src/config/migrate_v2.js",
+    "db:migrate:v3": "node src/config/migrate_v3.js",
+    "db:migrate:v4": "node src/config/migrate_v4.js",
+    "db:migrate:v5": "node src/config/migrate_v5.js",
+    "db:migrate:v6": "node src/config/migrate_v6.js",
+    "db:migrate:v7": "node src/config/migrate_v7.js",
+    "db:seed": "node src/config/seed.js",
+    "db:seed:admin": "node src/config/seed_admin.js",
+    "db:reset": "node src/config/reset.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "googleapis": "^128.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.6.5",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
