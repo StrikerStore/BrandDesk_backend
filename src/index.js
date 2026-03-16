@@ -40,20 +40,22 @@ const allowedOrigins = isProd
       process.env.FRONTEND_URL,
       'https://www.branddesk.in',
       'https://branddesk.in',
+      'https://branddesk-frontend-production.up.railway.app'
     ].filter(Boolean)
   : ['http://localhost:5173', 'http://localhost:3000'];
 
 app.use(cors({
   origin: (origin, cb) => {
-    // Allow requests with no origin (mobile apps, curl, Postman in dev)
-    if (!origin) return cb(null, !isProd);
+    if (!origin) return cb(null, true);
     if (allowedOrigins.includes(origin)) return cb(null, true);
     cb(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+app.options('*', cors());
 
 app.use(express.json({ limit: '2mb' })); // tighter limit
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
