@@ -35,18 +35,21 @@ app.use((req, res, next) => {
 });
 
 // ── CORS ──────────────────────────────────────────────────────
-const allowedOrigins = isProd
-  ? [
-      process.env.FRONTEND_URL,
-      'https://www.branddesk.in',
-      'https://branddesk.in',
-      'https://branddesk-frontend-production.up.railway.app'
-    ].filter(Boolean)
-  : ['http://localhost:5173', 'http://localhost:3000'];
+// Always include production origins regardless of NODE_ENV
+// so the app works even if NODE_ENV is not explicitly set on Railway.
+const allowedOrigins = [
+  'https://www.branddesk.in',
+  'https://branddesk.in',
+  'https://branddesk-frontend-production.up.railway.app',
+  process.env.FRONTEND_URL,   // any extra origin from Railway env
+  // dev origins
+  'http://localhost:5173',
+  'http://localhost:3000',
+].filter(Boolean);
 
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
+    if (!origin) return cb(null, true);   // allow server-to-server / curl
     if (allowedOrigins.includes(origin)) return cb(null, true);
     cb(new Error(`CORS: origin ${origin} not allowed`));
   },
@@ -56,7 +59,7 @@ const corsOptions = {
   optionsSuccessStatus: 204,
 };
 
-// Handle preflight requests with the SAME options (credentials-aware)
+// Handle preflight (OPTIONS) with the SAME credentials-aware config
 app.options('*', cors(corsOptions));
 app.use(cors(corsOptions));
 
