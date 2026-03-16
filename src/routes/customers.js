@@ -1,38 +1,27 @@
 const express = require('express');
-const { lookupCustomer, getLocalCustomer, updateCustomerNotes } = require('../services/shopify');
 const db = require('../config/db');
 
 const router = express.Router();
 
-// GET /api/customers/:email — lookup from Shopify then fall back to local DB
+// GET /api/customers/:email — lookup from local DB
 router.get('/:email', async (req, res) => {
   try {
     const email = decodeURIComponent(req.params.email);
-    const { brand } = req.query;
 
-    // Try Shopify first
-    let customer = null;
-    if (brand) {
-      customer = await lookupCustomer(email, brand);
-    }
+    const [rows] = await db.query('SELECT * FROM customers WHERE email=?', [email]);
+    const customer = rows[0] || { email, name: null, phone: null };
 
-    // Fall back to local DB
-    if (!customer) {
-      customer = await getLocalCustomer(email);
-    }
-
-    if (!customer) {
-      return res.json({ found: false, email });
-    }
-
-    // Fetch past tickets
+    // Fetch past tickets with parsed info
     const [pastTickets] = await db.query(
-      `SELECT id, subject, status, brand, created_at FROM threads 
-       WHERE customer_email = ? ORDER BY created_at DESC LIMIT 10`,
+      `SELECT id, subject, status, brand, ticket_id, order_number,
+              issue_category, sub_issue, created_at
+       FROM threads
+       WHERE customer_email = ?
+       ORDER BY created_at DESC LIMIT 10`,
       [email]
     );
 
-    res.json({ found: true, customer, pastTickets });
+    res.json({ found: !!rows.length, customer, pastTickets });
   } catch (err) {
     console.error('Customer lookup error:', err);
     res.status(500).json({ error: err.message });
