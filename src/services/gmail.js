@@ -128,7 +128,7 @@ async function syncThreads(fullSync = false) {
       // Fetch threads — paginate to get up to 300 on full sync
       const allThreadIds = [];
       let pageToken = undefined;
-      const maxToFetch = fullSync ? 300 : 20;
+      const maxToFetch = fullSync ? 500 : 20;
 
       do {
         const listRes = await gmail.users.threads.list({
