@@ -41,8 +41,12 @@ router.get('/google/callback', async (req, res) => {
       [email, tokens.access_token, tokens.refresh_token, tokens.expiry_date]
     );
 
-    req.session.userEmail = email;
-    req.session.authenticated = true;
+    // Session is optional — JWT cookies handle auth.
+    // Use optional chaining in case express-session middleware is not configured.
+    if (req.session) {
+      req.session.userEmail = email;
+      req.session.authenticated = true;
+    }
 
     res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}?auth=success`);
   } catch (err) {
