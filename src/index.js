@@ -44,7 +44,7 @@ const allowedOrigins = isProd
     ].filter(Boolean)
   : ['http://localhost:5173', 'http://localhost:3000'];
 
-app.use(cors({
+const corsOptions = {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
     if (allowedOrigins.includes(origin)) return cb(null, true);
@@ -52,10 +52,13 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
+};
 
-app.options('*', cors());
+// Handle preflight requests with the SAME options (credentials-aware)
+app.options('*', cors(corsOptions));
+app.use(cors(corsOptions));
 
 app.use(express.json({ limit: '2mb' })); // tighter limit
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
