@@ -13,6 +13,7 @@ const viewsRoutes     = require('./routes/views');
 const settingsRoutes  = require('./routes/settings');
 const usersRoutes     = require('./routes/users');
 const ordersRoutes    = require('./routes/orders');
+const aiRoutes        = require('./routes/ai');
 const authRoutes      = require('./routes/auth');
 const { syncThreads } = require('./services/gmail');
 const { runAutoAck, runAutoClose } = require('./services/automation');
@@ -86,6 +87,7 @@ app.use('/api/analytics', requireAuth, analyticsRoutes);
 app.use('/api/views',     requireAuth, viewsRoutes);
 app.use('/api/settings',  requireAuth, settingsRoutes);
 app.use('/api/orders',    requireAuth, ordersRoutes);
+app.use('/api/ai',        requireAuth, aiRoutes);
 
 // Manual sync — any authenticated user can trigger incremental, admin only for full resync
 app.post('/api/sync', requireAuth, async (req, res) => {
