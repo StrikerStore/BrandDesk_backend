@@ -81,10 +81,69 @@ router.get('/:id', async (req, res) => {
     const [messages] = await db.query(
       'SELECT * FROM messages WHERE thread_id = ? ORDER BY sent_at ASC', [req.params.id]
     );
+    // Attach image attachments to each message
+    const messageIds = messages.map(m => m.id);
+    let attachments = [];
+    if (messageIds.length) {
+      [attachments] = await db.query(
+        `SELECT * FROM attachments WHERE message_id IN (${messageIds.map(() => '?').join(',')})`,
+        messageIds
+      );
+    }
+    const attachMap = attachments.reduce((acc, a) => {
+      if (!acc[a.message_id]) acc[a.message_id] = [];
+      acc[a.message_id].push(a);
+      return acc;
+    }, {});
+    const messagesWithAttachments = messages.map(m => ({
+      ...m,
+      attachments: attachMap[m.id] || [],
+    }));
+
     await db.query('UPDATE threads SET is_unread = 0 WHERE id = ?', [req.params.id]);
-    res.json({ thread: threads[0], messages });
+    res.json({ thread: threads[0], messages: messagesWithAttachments });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/threads/attachment/:attachmentId?gmailMessageId=xxx
+// Proxies the image from Gmail API — keeps Gmail credentials server-side
+router.get('/attachment/:attachmentId', async (req, res) => {
+  try {
+    const { attachmentId } = req.params;
+    const { gmailMessageId } = req.query;
+    if (!gmailMessageId) return res.status(400).json({ error: 'gmailMessageId required' });
+
+    // Verify attachment exists in our DB (security check)
+    const [rows] = await db.query(
+      'SELECT * FROM attachments WHERE attachment_id = ? AND gmail_message_id = ?',
+      [attachmentId, gmailMessageId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Attachment not found' });
+
+    const { getAuthenticatedClient } = require('../services/gmail');
+    const { google } = require('googleapis');
+    const auth   = await getAuthenticatedClient();
+    const gmail  = google.gmail({ version: 'v1', auth });
+
+    const attRes = await gmail.users.messages.attachments.get({
+      userId:     'me',
+      messageId:  gmailMessageId,
+      id:         attachmentId,
+    });
+
+    const imageData = attRes.data.data
+      .replace(/-/g, '+')
+      .replace(/_/g, '/');
+
+    const buffer = Buffer.from(imageData, 'base64');
+    res.setHeader('Content-Type', rows[0].mime_type);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    res.send(buffer);
+  } catch (err) {
+    console.error('Attachment fetch error:', err.message);
+    res.status(500).json({ error: 'Failed to load image' });
   }
 });
 

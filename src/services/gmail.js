@@ -331,6 +331,23 @@ async function processThread(gmail, gmailThreadId, brand) {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [threadId, msg.id, direction, from, displayBody, html, msgDate]
     );
+    // Store image attachments
+    const [msgRow] = await db.query('SELECT id FROM messages WHERE gmail_message_id = ?', [msg.id]);
+    if (msgRow.length) {
+      const parts = msg.payload?.parts || [];
+      for (const part of parts) {
+        const isImage = part.mimeType?.startsWith('image/');
+        const attachmentId = part.body?.attachmentId;
+        const filename = part.filename;
+        if (isImage && attachmentId && filename) {
+          await db.query(
+            `INSERT IGNORE INTO attachments (message_id, gmail_message_id, attachment_id, filename, mime_type, size)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [msgRow[0].id, msg.id, attachmentId, filename, part.mimeType, part.body?.size || 0]
+          );
+        }
+      }
+    }
   }
 }
 
