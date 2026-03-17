@@ -7,11 +7,11 @@ async function improveText(text, mode) {
   if (!OPENROUTER_API_KEY) throw new Error('OPENROUTER_API_KEY not configured');
 
   const prompts = {
-    grammar: `You are a grammar corrector. Fix ONLY spelling, grammar, and punctuation errors in the text below. Do NOT rephrase, restructure, or change the meaning. Return ONLY the corrected text, nothing else.
+    grammar: `You are a grammar corrector. Fix ONLY spelling, grammar, and punctuation errors in the text below. Do NOT rephrase, restructure, or change the meaning. Do NOT use markdown formatting like ** or *. Return ONLY the corrected plain text, nothing else.
 
 Text: ${text}`,
 
-    professional: `You are a customer support writing assistant for an Indian e-commerce brand. Rewrite the text below into clear, polite, professional customer support language. Keep it warm but concise. Use simple English suitable for Indian customers. Do NOT add new information or promises. Return ONLY the rewritten text, nothing else.
+    professional: `You are a customer support writing assistant for an Indian e-commerce brand. Rewrite the text below into clear, polite, professional customer support language. Keep it warm but concise. Use simple English suitable for Indian customers. Do NOT add new information or promises. Do NOT use markdown formatting like ** or * or #. Return ONLY the rewritten plain text, nothing else.
 
 Text: ${text}`,
   };
