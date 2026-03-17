@@ -130,3 +130,5 @@ app.listen(PORT, () => {
   console.log(`🔒 Environment: ${isProd ? 'production' : 'development'}`);
   if (isProd) console.log(`🌐 Allowed origins: ${allowedOrigins.join(', ')}`);
 });
+
+// Test commit for deployment - ignore
