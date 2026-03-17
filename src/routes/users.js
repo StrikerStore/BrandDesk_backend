@@ -61,7 +61,10 @@ router.post('/login', async (req, res) => {
     // Clear rate limit on success
     loginAttempts.delete(ip);
 
-    res.json({ user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+    res.json({
+      user:  { id: user.id, name: user.name, email: user.email, role: user.role },
+      token, // also return in body for cross-domain localStorage fallback
+    });
   } catch (err) {
     res.status(500).json({ error: 'Login failed' }); // don't expose internals
   }

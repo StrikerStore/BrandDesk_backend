@@ -51,6 +51,7 @@ const corsOptions = {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);   // allow server-to-server / curl
     if (allowedOrigins.includes(origin)) return cb(null, true);
+    if (origin.endsWith('.railway.app')) return cb(null, true);
     cb(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true,
@@ -86,10 +87,15 @@ app.use('/api/views',     requireAuth, viewsRoutes);
 app.use('/api/settings',  requireAuth, settingsRoutes);
 app.use('/api/orders',    requireAuth, ordersRoutes);
 
-// Manual sync — admin only
-app.post('/api/sync', requireAdmin, async (req, res) => {
+// Manual sync — any authenticated user can trigger incremental, admin only for full resync
+app.post('/api/sync', requireAuth, async (req, res) => {
   try {
-    const result = await syncThreads(req.query.full === 'true');
+    const fullSync = req.query.full === 'true';
+    // Only admins can do full resync
+    if (fullSync && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Full resync requires admin access' });
+    }
+    const result = await syncThreads(fullSync);
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ error: err.message });
