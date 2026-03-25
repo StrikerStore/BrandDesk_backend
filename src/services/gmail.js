@@ -351,7 +351,7 @@ async function processThread(gmail, gmailThreadId, brand) {
   }
 }
 
-async function sendReply(gmailThreadId, body, brand, isNote = false) {
+async function sendReply(gmailThreadId, body, brand, isNote = false, attachments = []) {
   if (isNote) {
     // Internal notes are stored only, not sent
     const [thread] = await db.query('SELECT id FROM threads WHERE gmail_thread_id=?', [gmailThreadId]);
@@ -378,22 +378,58 @@ async function sendReply(gmailThreadId, body, brand, isNote = false) {
   // Build email
   const to = thread.customer_email;
   const subject = thread.subject.startsWith('Re:') ? thread.subject : `Re: ${thread.subject}`;
-  const emailLines = [
-    `From: ${brand.name} Support <${brand.email}>`,
-    `To: ${to}`,
-    `Subject: ${subject}`,
-    `In-Reply-To: ${gmailThreadId}`,
-    `References: ${gmailThreadId}`,
-    'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset=utf-8',
-    '',
-    body,
-  ];
-  const raw = Buffer.from(emailLines.join('\r\n'))
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+
+  let raw;
+  if (attachments && attachments.length > 0) {
+    // Multipart MIME for attachments
+    const boundary = `----=_Part_${Date.now()}`;
+    const lines = [
+      `From: ${brand.name} Support <${brand.email}>`,
+      `To: ${to}`,
+      `Subject: ${subject}`,
+      `In-Reply-To: ${gmailThreadId}`,
+      `References: ${gmailThreadId}`,
+      'MIME-Version: 1.0',
+      `Content-Type: multipart/mixed; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/html; charset=utf-8',
+      'Content-Transfer-Encoding: quoted-printable',
+      '',
+      body,
+    ];
+    for (const file of attachments) {
+      lines.push(`--${boundary}`);
+      lines.push(`Content-Type: ${file.mimetype}; name="${file.originalname}"`);
+      lines.push('Content-Transfer-Encoding: base64');
+      lines.push(`Content-Disposition: attachment; filename="${file.originalname}"`);
+      lines.push('');
+      lines.push(file.buffer.toString('base64'));
+    }
+    lines.push(`--${boundary}--`);
+    raw = Buffer.from(lines.join('\r\n'))
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+  } else {
+    const emailLines = [
+      `From: ${brand.name} Support <${brand.email}>`,
+      `To: ${to}`,
+      `Subject: ${subject}`,
+      `In-Reply-To: ${gmailThreadId}`,
+      `References: ${gmailThreadId}`,
+      'MIME-Version: 1.0',
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      body,
+    ];
+    raw = Buffer.from(emailLines.join('\r\n'))
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+  }
 
   const sendRes = await gmail.users.messages.send({
     userId: 'me',

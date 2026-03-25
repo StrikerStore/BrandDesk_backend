@@ -6,9 +6,7 @@
   "scripts": {
     "start": "npm run db:deploy && node src/index.js",
     "dev": "nodemon src/index.js",
-
     "db:deploy": "npm run db:migrate && npm run db:migrate:v2 && npm run db:migrate:v3 && npm run db:migrate:v4 && npm run db:migrate:v5 && npm run db:migrate:v6 && npm run db:migrate:v7 && npm run db:migrate:v8",
-
     "db:migrate": "node src/config/migrate.js",
     "db:migrate:v2": "node src/config/migrate_v2.js",
     "db:migrate:v3": "node src/config/migrate_v3.js",
@@ -29,6 +27,7 @@
     "express-session": "^1.17.3",
     "googleapis": "^128.0.0",
     "jsonwebtoken": "^9.0.2",
+    "multer": "^2.1.1",
     "mysql2": "^3.6.5",
     "node-cron": "^3.0.3"
   },

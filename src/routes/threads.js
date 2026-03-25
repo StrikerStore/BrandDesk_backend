@@ -1,10 +1,12 @@
 const express = require('express');
+const multer  = require('multer');
 const db = require('../config/db');
 const { syncThreads, sendReply } = require('../services/gmail');
 const { getBrandByName } = require('../config/brands');
 const { requireAdmin } = require('../middleware/authMiddleware');
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 // GET /api/threads
 router.get('/', async (req, res) => {
@@ -206,13 +208,14 @@ router.post('/:id/resolve', async (req, res) => {
 });
 
 // POST /api/threads/:gmailId/reply
-router.post('/:gmailId/reply', async (req, res) => {
+router.post('/:gmailId/reply', upload.array('attachments', 10), async (req, res) => {
   try {
     const { body, isNote, brandName } = req.body;
     if (!body?.trim()) return res.status(400).json({ error: 'Reply body is required' });
     const brand = getBrandByName(brandName);
     if (!brand) return res.status(400).json({ error: 'Invalid brand' });
-    const result = await sendReply(req.params.gmailId, body, brand, isNote);
+    const attachments = req.files || [];
+    const result = await sendReply(req.params.gmailId, body, brand, isNote, attachments);
     res.json(result);
   } catch (err) {
     console.error('Reply error:', err);
