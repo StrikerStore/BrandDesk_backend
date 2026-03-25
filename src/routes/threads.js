@@ -210,7 +210,9 @@ router.post('/:id/resolve', async (req, res) => {
 // POST /api/threads/:gmailId/reply
 router.post('/:gmailId/reply', upload.array('attachments', 10), async (req, res) => {
   try {
-    const { body, isNote, brandName } = req.body;
+    const { body, brandName } = req.body;
+    // isNote may arrive as string "true"/"false" from FormData, or boolean from JSON
+    const isNote = req.body.isNote === true || req.body.isNote === 'true';
     if (!body?.trim()) return res.status(400).json({ error: 'Reply body is required' });
     const brand = getBrandByName(brandName);
     if (!brand) return res.status(400).json({ error: 'Invalid brand' });

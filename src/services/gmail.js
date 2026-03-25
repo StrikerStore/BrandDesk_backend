@@ -379,11 +379,14 @@ async function sendReply(gmailThreadId, body, brand, isNote = false, attachments
   const to = thread.customer_email;
   const subject = thread.subject.startsWith('Re:') ? thread.subject : `Re: ${thread.subject}`;
 
+  // Helper: split base64 into 76-char lines (MIME spec)
+  const chunkBase64 = (b64) => b64.match(/.{1,76}/g).join('\r\n');
+
   let raw;
   if (attachments && attachments.length > 0) {
-    // Multipart MIME for attachments
     const boundary = `----=_Part_${Date.now()}`;
-    const lines = [
+    const bodyB64 = chunkBase64(Buffer.from(body).toString('base64'));
+    const parts = [
       `From: ${brand.name} Support <${brand.email}>`,
       `To: ${to}`,
       `Subject: ${subject}`,
@@ -394,24 +397,22 @@ async function sendReply(gmailThreadId, body, brand, isNote = false, attachments
       '',
       `--${boundary}`,
       'Content-Type: text/html; charset=utf-8',
-      'Content-Transfer-Encoding: quoted-printable',
+      'Content-Transfer-Encoding: base64',
       '',
-      body,
+      bodyB64,
     ];
     for (const file of attachments) {
-      lines.push(`--${boundary}`);
-      lines.push(`Content-Type: ${file.mimetype}; name="${file.originalname}"`);
-      lines.push('Content-Transfer-Encoding: base64');
-      lines.push(`Content-Disposition: attachment; filename="${file.originalname}"`);
-      lines.push('');
-      lines.push(file.buffer.toString('base64'));
+      const fileB64 = chunkBase64(file.buffer.toString('base64'));
+      parts.push(`--${boundary}`);
+      parts.push(`Content-Type: ${file.mimetype}; name="${file.originalname}"`);
+      parts.push('Content-Transfer-Encoding: base64');
+      parts.push(`Content-Disposition: attachment; filename="${file.originalname}"`);
+      parts.push('');
+      parts.push(fileB64);
     }
-    lines.push(`--${boundary}--`);
-    raw = Buffer.from(lines.join('\r\n'))
-      .toString('base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
+    parts.push(`--${boundary}--`);
+    raw = Buffer.from(parts.join('\r\n'))
+      .toString('base64url');
   } else {
     const emailLines = [
       `From: ${brand.name} Support <${brand.email}>`,
@@ -425,10 +426,7 @@ async function sendReply(gmailThreadId, body, brand, isNote = false, attachments
       body,
     ];
     raw = Buffer.from(emailLines.join('\r\n'))
-      .toString('base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
+      .toString('base64url');
   }
 
   const sendRes = await gmail.users.messages.send({
