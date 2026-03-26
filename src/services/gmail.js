@@ -92,13 +92,17 @@ function stripQuoted(text) {
   return cutoff > 0 ? lines.slice(0, cutoff).join('\n').trim() : text.trim();
 }
 
-// Get the timestamp of the most recent thread we have per brand
+// Get the timestamp of the most recent thread activity per brand
+// Uses GREATEST of created_at and updated_at so threads with new replies
+// (which update updated_at) are always caught by the incremental sync.
 async function getLastSyncTime(brandName) {
   const [rows] = await db.query(
-    'SELECT MAX(created_at) as last FROM threads WHERE brand = ?',
+    'SELECT GREATEST(COALESCE(MAX(created_at), 0), COALESCE(MAX(updated_at), 0)) as last FROM threads WHERE brand = ?',
     [brandName]
   );
-  return rows[0]?.last || null;
+  const val = rows[0]?.last;
+  // GREATEST returns 0 when both are NULL (no threads exist)
+  return val && val !== '0' && val !== 0 ? val : null;
 }
 
 // Incremental sync — only fetch threads newer than what we already have
@@ -128,7 +132,7 @@ async function syncThreads(fullSync = false) {
       // Fetch threads — paginate to get up to 300 on full sync
       const allThreadIds = [];
       let pageToken = undefined;
-      const maxToFetch = fullSync ? 500 : 20;
+      const maxToFetch = fullSync ? 500 : 50;
 
       do {
         const listRes = await gmail.users.threads.list({
