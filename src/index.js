@@ -39,6 +39,7 @@ app.use((req, res, next) => {
 // Always include production origins regardless of NODE_ENV
 // so the app works even if NODE_ENV is not explicitly set on Railway.
 const allowedOrigins = [
+  'https://internal.branddesk.in',
   'https://www.branddesk.in',
   'https://branddesk.in',
   'https://branddesk-frontend-production.up.railway.app',
