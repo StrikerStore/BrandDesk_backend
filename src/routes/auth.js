@@ -1,6 +1,6 @@
 const express = require('express');
 const { google } = require('googleapis');
-const { getAuthUrl, createOAuthClient } = require('../services/gmail');
+const { getAuthUrl, createOAuthClient, getAndClearOAuthState } = require('../services/gmail');
 const { requireAdmin, requireAuth } = require('../middleware/authMiddleware');
 const db = require('../config/db');
 
@@ -14,10 +14,17 @@ router.get('/google', requireAdmin, (req, res) => {
 
 // Step 2: Google redirects back here with code
 router.get('/google/callback', async (req, res) => {
-  const { code, error } = req.query;
+  const { code, error, state } = req.query;
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
 
   if (error) {
-    return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}?auth_error=${error}`);
+    return res.redirect(`${frontendUrl}?auth_error=${encodeURIComponent(error)}`);
+  }
+
+  // Verify OAuth state to prevent CSRF
+  const expectedState = getAndClearOAuthState();
+  if (!state || !expectedState || state !== expectedState) {
+    return res.redirect(`${frontendUrl}?auth_error=invalid_state`);
   }
 
   try {
@@ -48,10 +55,10 @@ router.get('/google/callback', async (req, res) => {
       req.session.authenticated = true;
     }
 
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}?auth=success`);
+    res.redirect(`${frontendUrl}?auth=success`);
   } catch (err) {
     console.error('OAuth callback error:', err.message);
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}?auth_error=callback_failed`);
+    res.redirect(`${frontendUrl}?auth_error=callback_failed`);
   }
 });
 

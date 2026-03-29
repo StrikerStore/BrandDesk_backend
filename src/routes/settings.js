@@ -1,6 +1,7 @@
 const express = require('express');
 const { getAllSettings, setSetting } = require('../services/settings');
 const { runAutoAck, runAutoClose } = require('../services/automation');
+const { requireAdmin } = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
@@ -10,12 +11,12 @@ router.get('/', async (req, res) => {
     const settings = await getAllSettings();
     res.json(settings);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Settings operation failed' });
   }
 });
 
-// PATCH /api/settings — update one or many settings
-router.patch('/', async (req, res) => {
+// PATCH /api/settings — update one or many settings (admin only)
+router.patch('/', requireAdmin, async (req, res) => {
   try {
     const updates = req.body;
     for (const [key, value] of Object.entries(updates)) {
@@ -24,27 +25,27 @@ router.patch('/', async (req, res) => {
     const settings = await getAllSettings();
     res.json(settings);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Settings operation failed' });
   }
 });
 
-// POST /api/settings/test-auto-ack — manually trigger auto-ack
-router.post('/test-auto-ack', async (req, res) => {
+// POST /api/settings/test-auto-ack — manually trigger auto-ack (admin only)
+router.post('/test-auto-ack', requireAdmin, async (req, res) => {
   try {
     await runAutoAck();
     res.json({ success: true, message: 'Auto-ack run complete' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Settings operation failed' });
   }
 });
 
-// POST /api/settings/test-auto-close — manually trigger auto-close
-router.post('/test-auto-close', async (req, res) => {
+// POST /api/settings/test-auto-close — manually trigger auto-close (admin only)
+router.post('/test-auto-close', requireAdmin, async (req, res) => {
   try {
     await runAutoClose();
     res.json({ success: true, message: 'Auto-close run complete' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Settings operation failed' });
   }
 });
 

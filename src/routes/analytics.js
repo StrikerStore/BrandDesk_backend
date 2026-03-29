@@ -29,13 +29,14 @@ router.get('/overview', async (req, res) => {
       avg_response_mins: avgResp.c  || 0,
       unread:            unread.c   || 0,
     });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(500).json({ error: 'Analytics query failed' }); }
 });
 
 // GET /api/analytics/volume
 router.get('/volume', async (req, res) => {
   try {
     const { days = 30, brand } = req.query;
+    const safeDays = Math.min(Math.max(parseInt(days) || 30, 1), 365);
     const bw = brand && brand !== 'all' ? `AND brand = ${db.escape(brand)}` : '';
     const [rows] = await db.query(`
       SELECT DATE(created_at) as date, COUNT(*) as total,
@@ -43,7 +44,7 @@ router.get('/volume', async (req, res) => {
       FROM threads
       WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY) ${bw}
       GROUP BY DATE(created_at) ORDER BY date ASC
-    `, [parseInt(days)]);
+    `, [safeDays]);
 
     // Fill missing days with zeros
     const map = {};
@@ -52,7 +53,7 @@ router.get('/volume', async (req, res) => {
       map[key] = r;
     });
     const result = [];
-    for (let i = parseInt(days); i >= 0; i--) {
+    for (let i = safeDays; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       const key  = d.toISOString().split('T')[0];
@@ -60,7 +61,7 @@ router.get('/volume', async (req, res) => {
       result.push({ date: key, label, total: Number(map[key]?.total || 0), resolved: Number(map[key]?.resolved || 0) });
     }
     res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(500).json({ error: 'Analytics query failed' }); }
 });
 
 // GET /api/analytics/by-brand
@@ -76,7 +77,7 @@ router.get('/by-brand', async (req, res) => {
       FROM threads GROUP BY brand ORDER BY total DESC
     `);
     res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(500).json({ error: 'Analytics query failed' }); }
 });
 
 // GET /api/analytics/by-issue
@@ -92,13 +93,14 @@ router.get('/by-issue', async (req, res) => {
       GROUP BY issue_category ORDER BY total DESC LIMIT 10
     `);
     res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(500).json({ error: 'Analytics query failed' }); }
 });
 
 // GET /api/analytics/response-time
 router.get('/response-time', async (req, res) => {
   try {
     const { days = 30, brand } = req.query;
+    const safeDays = Math.min(Math.max(parseInt(days) || 30, 1), 365);
     const bw = brand && brand !== 'all' ? `AND brand = ${db.escape(brand)}` : '';
     const [rows] = await db.query(`
       SELECT DATE(created_at) as date,
@@ -108,9 +110,9 @@ router.get('/response-time', async (req, res) => {
       WHERE first_response_minutes IS NOT NULL
         AND created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY) ${bw}
       GROUP BY DATE(created_at) ORDER BY date ASC
-    `, [parseInt(days)]);
+    `, [safeDays]);
     res.json(rows.map(r => ({ ...r, avg_mins: Number(r.avg_mins || 0) })));
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(500).json({ error: 'Analytics query failed' }); }
 });
 
 // GET /api/analytics/resolved-by  — resolution leaderboard
@@ -124,7 +126,7 @@ router.get('/resolved-by', async (req, res) => {
       GROUP BY resolved_by ORDER BY total DESC
     `);
     res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(500).json({ error: 'Analytics query failed' }); }
 });
 
 // GET /api/analytics/sla  — business-hours SLA stats
@@ -173,7 +175,7 @@ router.get('/sla', async (req, res) => {
       on_track,
       breaching_threads: breachingThreads.slice(0, 10),
     });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(500).json({ error: 'Analytics query failed' }); }
 });
 
 // GET /api/analytics/templates — most used templates
@@ -187,7 +189,7 @@ router.get('/templates', async (req, res) => {
       LIMIT 10
     `);
     res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(500).json({ error: 'Analytics query failed' }); }
 });
 
 module.exports = router;

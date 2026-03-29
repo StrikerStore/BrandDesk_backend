@@ -15,7 +15,7 @@ const usersRoutes     = require('./routes/users');
 const ordersRoutes    = require('./routes/orders');
 const aiRoutes        = require('./routes/ai');
 const authRoutes      = require('./routes/auth');
-const { syncThreads, watchMailbox, handlePushNotification, syncFromHistory, seedHistoryId } = require('./services/gmail');
+const { syncThreads, syncFromHistory, seedHistoryId } = require('./services/gmail');
 const { runAutoAck, runAutoClose } = require('./services/automation');
 const { requireAuth, requireAdmin } = require('./middleware/authMiddleware');
 
@@ -74,20 +74,6 @@ app.use(cookieParser());
 app.use('/api/users', usersRoutes); // login/logout are public; admin routes protected inside
 app.get('/health',    (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-// ── Gmail Push Webhook (public — Google Pub/Sub calls this) ──
-app.post('/api/gmail/webhook', async (req, res) => {
-  // Acknowledge immediately so Google doesn't retry
-  res.status(200).send('ok');
-  try {
-    const message = req.body?.message;
-    if (!message?.data) return;
-    const result = await handlePushNotification(message);
-    console.log(`📡 Webhook processed: ${result.total || 0} thread(s)`);
-  } catch (err) {
-    console.error('Webhook processing error:', err.message);
-  }
-});
-
 // ── Gmail OAuth ───────────────────────────────────────────────
 // /auth/google requires admin (inside route)
 // /auth/google/callback is public (Google redirect)
@@ -115,7 +101,7 @@ app.post('/api/sync', requireAuth, async (req, res) => {
     const result = fullSync ? await syncThreads(true) : await syncFromHistory();
     res.json({ success: true, ...result });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Sync failed' });
   }
 });
 
@@ -132,18 +118,6 @@ app.use((err, req, res, next) => {
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
-
-// ── Gmail Push Watch (if Pub/Sub is configured) ─────────────
-if (process.env.GOOGLE_PUBSUB_TOPIC) {
-  setTimeout(async () => {
-    try { await watchMailbox(); }
-    catch (err) { if (!err.message?.includes('Not authenticated')) console.error('Watch setup error:', err.message); }
-  }, 5000);
-  cron.schedule('0 0 * * *', async () => {
-    try { await watchMailbox(); }
-    catch (err) { console.error('Watch renewal error:', err.message); }
-  });
-}
 
 // ── Seed history ID on startup (for fast history polling) ────
 setTimeout(async () => {

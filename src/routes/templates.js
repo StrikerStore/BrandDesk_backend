@@ -35,7 +35,7 @@ router.get('/', async (req, res) => {
 
     res.json({ templates, grouped });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Template operation failed' });
   }
 });
 
@@ -53,7 +53,7 @@ router.post('/', async (req, res) => {
     const [rows] = await db.query('SELECT * FROM templates WHERE id=?', [result.insertId]);
     res.json(rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Template operation failed' });
   }
 });
 
@@ -71,7 +71,7 @@ router.put('/:id', async (req, res) => {
     const [rows] = await db.query('SELECT * FROM templates WHERE id=?', [id]);
     res.json(rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Template operation failed' });
   }
 });
 
@@ -81,7 +81,7 @@ router.delete('/:id', async (req, res) => {
     await db.query('DELETE FROM templates WHERE id=?', [req.params.id]);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Template operation failed' });
   }
 });
 
@@ -91,7 +91,7 @@ router.post('/:id/use', async (req, res) => {
     await db.query('UPDATE templates SET usage_count = usage_count + 1 WHERE id=?', [req.params.id]);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Template operation failed' });
   }
 });
 

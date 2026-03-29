@@ -10,17 +10,29 @@ function createOAuthClient() {
   );
 }
 
+const crypto = require('crypto');
+
 function getAuthUrl() {
   const client = createOAuthClient();
+  const state = crypto.randomBytes(32).toString('hex');
+  // Store state for verification in callback
+  getAuthUrl._pendingState = state;
   return client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
+    state,
     scope: [
       'https://www.googleapis.com/auth/gmail.modify',
       'https://www.googleapis.com/auth/gmail.send',
       'https://www.googleapis.com/auth/userinfo.email',
     ],
   });
+}
+
+function getAndClearOAuthState() {
+  const state = getAuthUrl._pendingState;
+  getAuthUrl._pendingState = null;
+  return state;
 }
 
 async function getStoredTokens() {
@@ -699,6 +711,6 @@ async function syncFromHistory(triggerHistoryId) {
 }
 
 module.exports = {
-  getAuthUrl, getAuthenticatedClient, syncThreads, sendReply, createOAuthClient,
+  getAuthUrl, getAndClearOAuthState, getAuthenticatedClient, syncThreads, sendReply, createOAuthClient,
   watchMailbox, handlePushNotification, syncFromHistory, seedHistoryId,
 };

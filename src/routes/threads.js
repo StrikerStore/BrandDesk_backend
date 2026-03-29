@@ -55,7 +55,7 @@ router.get('/', async (req, res) => {
     res.json({ threads: threadsWithSLA, total: countResult[0].total, page: parseInt(page), limit: parseInt(limit) });
   } catch (err) {
     console.error('Error fetching threads:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to fetch threads' });
   }
 });
 
@@ -71,7 +71,7 @@ router.get('/stats/overview', async (req, res) => {
       byBrand, unread: unread[0].count, urgent: urgent[0].count,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to fetch stats' });
   }
 });
 
@@ -105,7 +105,7 @@ router.get('/:id', async (req, res) => {
     await db.query('UPDATE threads SET is_unread = 0 WHERE id = ?', [req.params.id]);
     res.json({ thread: threads[0], messages: messagesWithAttachments });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to fetch thread' });
   }
 });
 
@@ -140,7 +140,12 @@ router.get('/attachment/:attachmentId', async (req, res) => {
       .replace(/_/g, '/');
 
     const buffer = Buffer.from(imageData, 'base64');
-    res.setHeader('Content-Type', rows[0].mime_type);
+    // Only allow safe mime types; default to octet-stream for anything unexpected
+    const safeMimeTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf'];
+    const mimeType = safeMimeTypes.includes(rows[0].mime_type) ? rows[0].mime_type : 'application/octet-stream';
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Disposition', 'inline; filename="attachment"');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'private, max-age=86400');
     res.send(buffer);
   } catch (err) {
@@ -150,6 +155,9 @@ router.get('/attachment/:attachmentId', async (req, res) => {
 });
 
 // PATCH /api/threads/:id — general updates (status, priority, tags)
+const VALID_STATUSES   = ['open', 'in_progress', 'resolved'];
+const VALID_PRIORITIES = ['normal', 'urgent'];
+
 router.patch('/:id', async (req, res) => {
   try {
     const { status, priority, tags, snoozed_until } = req.body;
@@ -157,10 +165,14 @@ router.patch('/:id', async (req, res) => {
     const params  = [];
 
     if (status !== undefined) {
+      if (!VALID_STATUSES.includes(status)) return res.status(400).json({ error: 'Invalid status value' });
       updates.push('status = ?', 'status_changed_at = NOW()');
       params.push(status);
     }
-    if (priority      !== undefined) { updates.push('priority = ?');      params.push(priority); }
+    if (priority !== undefined) {
+      if (!VALID_PRIORITIES.includes(priority)) return res.status(400).json({ error: 'Invalid priority value' });
+      updates.push('priority = ?'); params.push(priority);
+    }
     if (tags          !== undefined) { updates.push('tags = ?');          params.push(JSON.stringify(tags)); }
     if (snoozed_until !== undefined) { updates.push('snoozed_until = ?'); params.push(snoozed_until || null); }
 
@@ -171,7 +183,7 @@ router.patch('/:id', async (req, res) => {
     const [updated] = await db.query('SELECT * FROM threads WHERE id = ?', [req.params.id]);
     res.json(updated[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to update thread' });
   }
 });
 
@@ -203,7 +215,7 @@ router.post('/:id/resolve', async (req, res) => {
     const [updated] = await db.query('SELECT * FROM threads WHERE id = ?', [req.params.id]);
     res.json(updated[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to resolve thread' });
   }
 });
 
@@ -221,7 +233,7 @@ router.post('/:gmailId/reply', upload.array('attachments', 10), async (req, res)
     res.json(result);
   } catch (err) {
     console.error('Reply error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to send reply' });
   }
 });
 

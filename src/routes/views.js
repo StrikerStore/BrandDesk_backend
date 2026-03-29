@@ -8,7 +8,7 @@ router.get('/', async (req, res) => {
     const [rows] = await db.query('SELECT * FROM saved_views ORDER BY sort_order ASC, created_at ASC');
     res.json(rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Views operation failed' });
   }
 });
 
@@ -26,7 +26,7 @@ router.post('/', async (req, res) => {
     const [rows] = await db.query('SELECT * FROM saved_views WHERE id = ?', [result.insertId]);
     res.json(rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Views operation failed' });
   }
 });
 
@@ -36,7 +36,7 @@ router.delete('/:id', async (req, res) => {
     await db.query('DELETE FROM saved_views WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Views operation failed' });
   }
 });
 

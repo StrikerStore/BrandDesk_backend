@@ -36,7 +36,7 @@ router.get('/customer/:email', async (req, res) => {
     res.json(rows);
   } catch (err) {
     if (err.message?.includes('ORDER_DB_HOST')) return res.status(503).json({ error: 'Order database not configured' });
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to fetch customer orders' });
   }
 });
 
@@ -117,7 +117,7 @@ router.get('/:orderId', async (req, res) => {
   } catch (err) {
     if (err.message?.includes('ORDER_DB_HOST')) return res.status(503).json({ error: 'Order database not configured' });
     console.error('Order fetch error:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to fetch order' });
   }
 });
 

@@ -24,7 +24,7 @@ router.get('/:email', async (req, res) => {
     res.json({ found: !!rows.length, customer, pastTickets });
   } catch (err) {
     console.error('Customer lookup error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to look up customer' });
   }
 });
 
@@ -33,10 +33,14 @@ router.patch('/:email/notes', async (req, res) => {
   try {
     const email = decodeURIComponent(req.params.email);
     const { notes } = req.body;
-    await updateCustomerNotes(email, notes);
+    await db.query(
+      `INSERT INTO customers (email, notes) VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE notes = VALUES(notes)`,
+      [email, notes || null]
+    );
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to update notes' });
   }
 });
 
@@ -57,7 +61,7 @@ router.post('/', async (req, res) => {
     const [rows] = await db.query('SELECT * FROM customers WHERE email=?', [email]);
     res.json(rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to create customer' });
   }
 });
 
