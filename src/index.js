@@ -15,7 +15,7 @@ const usersRoutes     = require('./routes/users');
 const ordersRoutes    = require('./routes/orders');
 const aiRoutes        = require('./routes/ai');
 const authRoutes      = require('./routes/auth');
-const { syncThreads } = require('./services/gmail');
+const { syncThreads, watchMailbox, handlePushNotification, syncFromHistory, seedHistoryId } = require('./services/gmail');
 const { runAutoAck, runAutoClose } = require('./services/automation');
 const { requireAuth, requireAdmin } = require('./middleware/authMiddleware');
 
@@ -74,6 +74,20 @@ app.use(cookieParser());
 app.use('/api/users', usersRoutes); // login/logout are public; admin routes protected inside
 app.get('/health',    (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
+// ── Gmail Push Webhook (public — Google Pub/Sub calls this) ──
+app.post('/api/gmail/webhook', async (req, res) => {
+  // Acknowledge immediately so Google doesn't retry
+  res.status(200).send('ok');
+  try {
+    const message = req.body?.message;
+    if (!message?.data) return;
+    const result = await handlePushNotification(message);
+    console.log(`📡 Webhook processed: ${result.total || 0} thread(s)`);
+  } catch (err) {
+    console.error('Webhook processing error:', err.message);
+  }
+});
+
 // ── Gmail OAuth ───────────────────────────────────────────────
 // /auth/google requires admin (inside route)
 // /auth/google/callback is public (Google redirect)
@@ -90,15 +104,15 @@ app.use('/api/settings',  requireAuth, settingsRoutes);
 app.use('/api/orders',    requireAuth, ordersRoutes);
 app.use('/api/ai',        requireAuth, aiRoutes);
 
-// Manual sync — any authenticated user can trigger incremental, admin only for full resync
+// Manual sync — uses fast history sync, full resync for admins
 app.post('/api/sync', requireAuth, async (req, res) => {
   try {
     const fullSync = req.query.full === 'true';
-    // Only admins can do full resync
     if (fullSync && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Full resync requires admin access' });
     }
-    const result = await syncThreads(fullSync);
+    // Full sync uses thread listing; normal sync uses fast history API
+    const result = fullSync ? await syncThreads(true) : await syncFromHistory();
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -119,9 +133,37 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
+// ── Gmail Push Watch (if Pub/Sub is configured) ─────────────
+if (process.env.GOOGLE_PUBSUB_TOPIC) {
+  setTimeout(async () => {
+    try { await watchMailbox(); }
+    catch (err) { if (!err.message?.includes('Not authenticated')) console.error('Watch setup error:', err.message); }
+  }, 5000);
+  cron.schedule('0 0 * * *', async () => {
+    try { await watchMailbox(); }
+    catch (err) { console.error('Watch renewal error:', err.message); }
+  });
+}
+
+// ── Seed history ID on startup (for fast history polling) ────
+setTimeout(async () => {
+  try { await seedHistoryId(); }
+  catch (err) { if (!err.message?.includes('Not authenticated')) console.error('History seed error:', err.message); }
+}, 5000);
+
 // ── Cron jobs ─────────────────────────────────────────────────
-const pollMinutes = Math.max(1, Math.round(parseInt(process.env.POLL_INTERVAL || '60000') / 60000));
-cron.schedule(`*/${pollMinutes} * * * *`, async () => {
+// Fast history poll every 15 seconds — lightweight API call
+let historyPollRunning = false;
+setInterval(async () => {
+  if (historyPollRunning) return;
+  historyPollRunning = true;
+  try { await syncFromHistory(); }
+  catch (err) { if (!err.message?.includes('Not authenticated')) console.error('History sync error:', err.message); }
+  finally { historyPollRunning = false; }
+}, 15000);
+
+// Full sync fallback every 5 min (catches anything history missed)
+cron.schedule('*/5 * * * *', async () => {
   try { await syncThreads(false); }
   catch (err) { if (!err.message?.includes('Not authenticated')) console.error('Sync error:', err.message); }
 });

@@ -313,7 +313,7 @@ async function processThread(gmail, gmailThreadId, brand) {
 
     const msgHeaders = msg.payload?.headers || [];
     const from       = getHeader(msgHeaders, 'From');
-    const direction  = isOurEmail(from) ? 'outbound' : 'inbound';
+    const direction  = msg.labelIds?.includes('SENT') ? 'outbound' : 'inbound';
     const { text, html } = extractBody(msg.payload);
     const rawMsgBody = text || html.replace(/<[^>]+>/g, '');
     const msgDate    = new Date(parseInt(msg.internalDate));
@@ -472,4 +472,233 @@ async function sendReply(gmailThreadId, body, brand, isNote = false, attachments
   return { success: true, messageId: sendRes.data.id };
 }
 
-module.exports = { getAuthUrl, getAuthenticatedClient, syncThreads, sendReply, createOAuthClient };
+// ── Gmail Push Notifications (Pub/Sub) ───────────────────────
+
+async function getStoredHistoryId() {
+  const [rows] = await db.query('SELECT history_id FROM auth_tokens LIMIT 1');
+  return rows[0]?.history_id || null;
+}
+
+async function saveHistoryId(historyId) {
+  await db.query('UPDATE auth_tokens SET history_id = ?', [historyId]);
+}
+
+/**
+ * Seed the history_id on startup so history polling has a baseline.
+ * Calls Gmail profile to get the current historyId.
+ */
+async function seedHistoryId() {
+  const stored = await getStoredHistoryId();
+  if (stored) return; // already have a baseline
+
+  try {
+    const auth = await getAuthenticatedClient();
+    const gmail = google.gmail({ version: 'v1', auth });
+    const profile = await gmail.users.getProfile({ userId: 'me' });
+    const historyId = profile.data.historyId;
+    if (historyId) {
+      await saveHistoryId(historyId);
+      console.log(`📡 History baseline seeded: ${historyId}`);
+    }
+  } catch (err) {
+    console.error('Failed to seed historyId:', err.message);
+  }
+}
+
+/**
+ * Register Gmail mailbox for push notifications via Google Pub/Sub.
+ * Requires env: GOOGLE_PUBSUB_TOPIC (e.g. projects/my-project/topics/gmail-push)
+ * Must be called on startup and renewed every ~24h (watch expires in 7 days).
+ */
+async function watchMailbox() {
+  const topic = process.env.GOOGLE_PUBSUB_TOPIC;
+  if (!topic) {
+    console.log('⚠️  GOOGLE_PUBSUB_TOPIC not set — Gmail push disabled, using polling only');
+    return null;
+  }
+
+  try {
+    const auth = await getAuthenticatedClient();
+    const gmail = google.gmail({ version: 'v1', auth });
+
+    const res = await gmail.users.watch({
+      userId: 'me',
+      requestBody: {
+        topicName: topic,
+        labelFilterAction: 'include',
+        labelIds: ['INBOX'],
+      },
+    });
+
+    const { historyId, expiration } = res.data;
+    console.log(`📡 Gmail watch active — historyId: ${historyId}, expires: ${new Date(parseInt(expiration)).toISOString()}`);
+
+    // Seed history_id if we don't have one yet
+    const stored = await getStoredHistoryId();
+    if (!stored) {
+      await saveHistoryId(historyId);
+    }
+
+    return res.data;
+  } catch (err) {
+    console.error('Gmail watch failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Process a Gmail Pub/Sub push notification.
+ * Google POSTs { message: { data: base64({emailAddress, historyId}) } }
+ */
+async function handlePushNotification(pubsubMessage) {
+  const data = JSON.parse(Buffer.from(pubsubMessage.data, 'base64').toString());
+  const { historyId: newHistoryId } = data;
+
+  if (!newHistoryId) return { processed: 0 };
+
+  return syncFromHistory(newHistoryId);
+}
+
+/**
+ * Use Gmail history.list to fetch only threads that changed since our last sync.
+ * Much faster than full thread listing — processes only affected threads.
+ */
+async function syncFromHistory(triggerHistoryId) {
+  const startHistoryId = await getStoredHistoryId();
+  if (!startHistoryId) {
+    // No history baseline — fall back to regular sync
+    console.log('📥 No history baseline, falling back to full sync');
+    return syncThreads(false);
+  }
+
+  try {
+    const auth = await getAuthenticatedClient();
+    const gmail = google.gmail({ version: 'v1', auth });
+    const { getBrands } = require('../config/brands');
+    const brands = getBrands();
+
+    // Fetch history since our last known point
+    const changedThreadIds = new Set();
+    let pageToken = undefined;
+    let latestHistoryId = startHistoryId;
+
+    do {
+      const res = await gmail.users.history.list({
+        userId: 'me',
+        startHistoryId: startHistoryId.toString(),
+        historyTypes: ['messageAdded'],
+        ...(pageToken ? { pageToken } : {}),
+      });
+
+      // Track the latest historyId from the response
+      if (res.data.historyId) {
+        latestHistoryId = res.data.historyId;
+      }
+
+      const histories = res.data.history || [];
+      for (const h of histories) {
+        const added = h.messagesAdded || [];
+        for (const m of added) {
+          if (m.message?.threadId) {
+            changedThreadIds.add(m.message.threadId);
+          }
+        }
+      }
+
+      pageToken = res.data.nextPageToken;
+    } while (pageToken);
+
+    // Always advance the history ID even if no changes
+    const newHistoryId = triggerHistoryId || latestHistoryId;
+    if (newHistoryId !== startHistoryId) {
+      await saveHistoryId(newHistoryId);
+    }
+
+    if (changedThreadIds.size === 0) {
+      return { newThreads: 0, updatedThreads: 0, total: 0 };
+    }
+
+    console.log(`📡 History sync: ${changedThreadIds.size} thread(s) changed`);
+
+    // Build label-to-brand lookup
+    const labelToBrand = {};
+    for (const brand of brands) {
+      // Resolve Gmail label ID from label name
+      if (!labelToBrand._resolved) {
+        try {
+          const labelsRes = await gmail.users.labels.list({ userId: 'me' });
+          const allLabels = labelsRes.data.labels || [];
+          for (const b of brands) {
+            const match = allLabels.find(l => l.name === b.label || l.name.endsWith('/' + b.label));
+            if (match) labelToBrand[match.id] = b;
+          }
+          labelToBrand._resolved = true;
+        } catch { labelToBrand._resolved = true; }
+      }
+    }
+
+    let newThreads = 0;
+    let updatedThreads = 0;
+
+    for (const threadId of changedThreadIds) {
+      try {
+        // Check if thread exists in DB
+        const [existing] = await db.query('SELECT id, brand FROM threads WHERE gmail_thread_id = ?', [threadId]);
+
+        let brand;
+        if (existing.length) {
+          // Known thread — look up brand from DB
+          brand = brands.find(b => b.name === existing[0].brand);
+        } else {
+          // New thread — fetch from Gmail to check labels
+          const threadRes = await gmail.users.threads.get({
+            userId: 'me',
+            id: threadId,
+            format: 'minimal',
+          });
+          const labelIds = threadRes.data.messages?.[0]?.labelIds || [];
+          // Match label to brand
+          brand = labelIds.map(lid => labelToBrand[lid]).find(Boolean);
+          // Fallback: check label names directly
+          if (!brand) {
+            brand = brands.find(b => labelIds.includes(b.label));
+          }
+        }
+
+        if (!brand) continue; // Not a brand thread, skip
+
+        const isNew = !existing.length;
+        await processThread(gmail, threadId, brand);
+        if (isNew) newThreads++;
+        else updatedThreads++;
+      } catch (err) {
+        console.error(`Push sync error for thread ${threadId}:`, err.message);
+      }
+    }
+
+    const summary = `📡 History sync complete — ${newThreads} new, ${updatedThreads} updated`;
+    console.log(summary);
+    return { newThreads, updatedThreads, total: newThreads + updatedThreads };
+
+  } catch (err) {
+    if (err.code === 404 || err.message?.includes('notFound')) {
+      // historyId too old — Gmail purged it, fall back to regular sync
+      console.log('📥 History expired, falling back to regular sync');
+      const result = await syncThreads(false);
+      // Reset history baseline via profile
+      try {
+        const auth = await getAuthenticatedClient();
+        const gmail = google.gmail({ version: 'v1', auth });
+        const profile = await gmail.users.getProfile({ userId: 'me' });
+        if (profile.data.historyId) await saveHistoryId(profile.data.historyId);
+      } catch {}
+      return result;
+    }
+    throw err;
+  }
+}
+
+module.exports = {
+  getAuthUrl, getAuthenticatedClient, syncThreads, sendReply, createOAuthClient,
+  watchMailbox, handlePushNotification, syncFromHistory, seedHistoryId,
+};

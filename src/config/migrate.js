@@ -22,10 +22,16 @@ async function migrate() {
       access_token TEXT NOT NULL,
       refresh_token TEXT,
       expiry_date BIGINT,
+      history_id BIGINT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     )
   `);
+
+  // Add history_id column if missing (existing installs)
+  await conn.query(`
+    ALTER TABLE auth_tokens ADD COLUMN IF NOT EXISTS history_id BIGINT NULL
+  `).catch(() => {});
 
   // Customers table
   await conn.query(`
