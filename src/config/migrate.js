@@ -119,6 +119,8 @@ async function migrate() {
   await addColumn(conn, 'threads', 'resolved_at',       'TIMESTAMP NULL');
   // v6 column
   await addColumn(conn, 'threads', 'auto_ack_sent', 'TINYINT(1) DEFAULT 0');
+  // v9 column — manual tickets raised by agents
+  await addColumn(conn, 'threads', 'is_manual', 'TINYINT(1) DEFAULT 0');
   // v2 index
   await addIndex(conn, 'threads', 'idx_ticket_id', 'INDEX idx_ticket_id (ticket_id)');
   // v4 backfill

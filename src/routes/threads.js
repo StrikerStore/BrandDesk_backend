@@ -219,6 +219,86 @@ router.post('/:id/resolve', async (req, res) => {
   }
 });
 
+// POST /api/threads/manual — agent raises a ticket on behalf of a customer
+router.post('/manual', async (req, res) => {
+  try {
+    const { customer_email, customer_name, brand, subject, issue_category, order_number, description, priority } = req.body;
+
+    if (!customer_email?.trim() || !customer_email.includes('@')) {
+      return res.status(400).json({ error: 'Valid customer email is required' });
+    }
+    if (!subject?.trim()) return res.status(400).json({ error: 'Subject is required' });
+    if (!brand?.trim())   return res.status(400).json({ error: 'Brand is required' });
+    if (!description?.trim()) return res.status(400).json({ error: 'Description is required' });
+
+    const brandObj = getBrandByName(brand);
+    if (!brandObj) return res.status(400).json({ error: 'Invalid brand' });
+
+    const crypto   = require('crypto');
+    const manualId = `manual_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const safePriority = ['normal', 'urgent'].includes(priority) ? priority : 'normal';
+    const safeEmail    = customer_email.trim().toLowerCase();
+
+    // Try inserting with is_manual (requires migration v9); fall back without it
+    let result;
+    try {
+      [result] = await db.query(
+        `INSERT INTO threads
+           (gmail_thread_id, subject, brand, brand_email, status, priority,
+            customer_email, customer_name, issue_category, order_number, is_manual, is_unread)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 1, 0)`,
+        [
+          manualId,
+          subject.trim().slice(0, 500),
+          brand,
+          brandObj.email,
+          safePriority,
+          safeEmail,
+          customer_name?.trim().slice(0, 255) || null,
+          issue_category?.trim().slice(0, 255) || null,
+          order_number?.trim().slice(0, 100)   || null,
+        ]
+      );
+    } catch (colErr) {
+      if (colErr.code === 'ER_BAD_FIELD_ERROR') {
+        [result] = await db.query(
+          `INSERT INTO threads
+             (gmail_thread_id, subject, brand, brand_email, status, priority,
+              customer_email, customer_name, issue_category, order_number, is_unread)
+           VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 0)`,
+          [
+            manualId,
+            subject.trim().slice(0, 500),
+            brand,
+            brandObj.email,
+            safePriority,
+            safeEmail,
+            customer_name?.trim().slice(0, 255) || null,
+            issue_category?.trim().slice(0, 255) || null,
+            order_number?.trim().slice(0, 100)   || null,
+          ]
+        );
+      } else {
+        throw colErr;
+      }
+    }
+
+    const threadId = result.insertId;
+
+    await db.query(
+      `INSERT INTO messages (thread_id, direction, from_email, from_name, body, is_note, sent_at)
+       VALUES (?, 'inbound', ?, ?, ?, 0, NOW())`,
+      [threadId, safeEmail, customer_name?.trim() || safeEmail, description.trim()]
+    );
+
+    const [rows] = await db.query('SELECT * FROM threads WHERE id = ?', [threadId]);
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Manual ticket creation error:', err);
+    res.status(500).json({ error: 'Failed to create ticket' });
+  }
+});
+
 // POST /api/threads/:gmailId/reply
 router.post('/:gmailId/reply', upload.array('attachments', 10), async (req, res) => {
   try {
@@ -226,6 +306,30 @@ router.post('/:gmailId/reply', upload.array('attachments', 10), async (req, res)
     // isNote may arrive as string "true"/"false" from FormData, or boolean from JSON
     const isNote = req.body.isNote === true || req.body.isNote === 'true';
     if (!body?.trim()) return res.status(400).json({ error: 'Reply body is required' });
+
+    // Manual tickets don't have a real Gmail thread — store the message locally only
+    if (req.params.gmailId.startsWith('manual_')) {
+      const [threadRows] = await db.query(
+        'SELECT id FROM threads WHERE gmail_thread_id = ?', [req.params.gmailId]
+      );
+      if (!threadRows.length) return res.status(404).json({ error: 'Thread not found' });
+      const threadId = threadRows[0].id;
+      const brand = getBrandByName(brandName);
+      const fromEmail = brand?.email || brandName || 'agent';
+      await db.query(
+        `INSERT INTO messages (thread_id, direction, from_email, body, is_note, sent_at)
+         VALUES (?, 'outbound', ?, ?, ?, NOW())`,
+        [threadId, fromEmail, body.trim(), isNote ? 1 : 0]
+      );
+      if (!isNote) {
+        await db.query(
+          "UPDATE threads SET status = 'in_progress', status_changed_at = NOW() WHERE id = ? AND status = 'open'",
+          [threadId]
+        );
+      }
+      return res.json({ success: true, isManual: true });
+    }
+
     const brand = getBrandByName(brandName);
     if (!brand) return res.status(400).json({ error: 'Invalid brand' });
     const attachments = req.files || [];
