@@ -484,6 +484,45 @@ async function sendReply(gmailThreadId, body, brand, isNote = false, attachments
   return { success: true, messageId: sendRes.data.id };
 }
 
+async function sendInitialEmail(customerEmail, subject, body, brand, ticketId) {
+  const auth = await getAuthenticatedClient();
+  const gmail = google.gmail({ version: 'v1', auth });
+
+  const htmlBody = [
+    `<div style="font-family:sans-serif;color:#1a1a1a;line-height:1.6;">`,
+    body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>'),
+    `</div>`,
+    `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:12px;color:#9ca3af;">`,
+    `Ticket Reference: ${ticketId}`,
+    `</div>`,
+  ].join('');
+
+  const chunkBase64 = (b64) => b64.match(/.{1,76}/g).join('\r\n');
+  const bodyB64 = chunkBase64(Buffer.from(htmlBody).toString('base64'));
+
+  const emailLines = [
+    `From: ${brand.name} Support <${brand.email}>`,
+    `To: ${customerEmail}`,
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    bodyB64,
+  ];
+  const raw = Buffer.from(emailLines.join('\r\n')).toString('base64url');
+
+  const sendRes = await gmail.users.messages.send({
+    userId: 'me',
+    requestBody: { raw },
+  });
+
+  return {
+    gmailThreadId: sendRes.data.threadId,
+    gmailMessageId: sendRes.data.id,
+  };
+}
+
 // ── Gmail Push Notifications (Pub/Sub) ───────────────────────
 
 async function getStoredHistoryId() {
@@ -711,6 +750,6 @@ async function syncFromHistory(triggerHistoryId) {
 }
 
 module.exports = {
-  getAuthUrl, getAndClearOAuthState, getAuthenticatedClient, syncThreads, sendReply, createOAuthClient,
+  getAuthUrl, getAndClearOAuthState, getAuthenticatedClient, syncThreads, sendReply, sendInitialEmail, createOAuthClient,
   watchMailbox, handlePushNotification, syncFromHistory, seedHistoryId,
 };

@@ -1,7 +1,7 @@
 const express = require('express');
 const multer  = require('multer');
 const db = require('../config/db');
-const { syncThreads, sendReply } = require('../services/gmail');
+const { syncThreads, sendReply, sendInitialEmail } = require('../services/gmail');
 const { getBrandByName } = require('../config/brands');
 const { requireAdmin } = require('../middleware/authMiddleware');
 
@@ -222,80 +222,75 @@ router.post('/:id/resolve', async (req, res) => {
 // POST /api/threads/manual — agent raises a ticket on behalf of a customer
 router.post('/manual', async (req, res) => {
   try {
-    const { customer_email, customer_name, brand, subject, issue_category, order_number, description, priority } = req.body;
+    const {
+      customer_email, customer_name, brand, subject,
+      issue_category, sub_issue, order_number, description, priority,
+    } = req.body;
 
     if (!customer_email?.trim() || !customer_email.includes('@')) {
       return res.status(400).json({ error: 'Valid customer email is required' });
     }
-    if (!subject?.trim()) return res.status(400).json({ error: 'Subject is required' });
-    if (!brand?.trim())   return res.status(400).json({ error: 'Brand is required' });
-    if (!description?.trim()) return res.status(400).json({ error: 'Description is required' });
+    if (!subject?.trim())      return res.status(400).json({ error: 'Subject is required' });
+    if (!brand?.trim())        return res.status(400).json({ error: 'Brand is required' });
+    if (!description?.trim())  return res.status(400).json({ error: 'Initial message is required' });
 
     const brandObj = getBrandByName(brand);
     if (!brandObj) return res.status(400).json({ error: 'Invalid brand' });
 
-    const crypto   = require('crypto');
-    const manualId = `manual_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const safePriority = ['normal', 'urgent'].includes(priority) ? priority : 'normal';
     const safeEmail    = customer_email.trim().toLowerCase();
 
-    // Try inserting with is_manual (requires migration v9); fall back without it
-    let result;
-    try {
-      [result] = await db.query(
-        `INSERT INTO threads
-           (gmail_thread_id, subject, brand, brand_email, status, priority,
-            customer_email, customer_name, issue_category, order_number, is_manual, is_unread)
-         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 1, 0)`,
-        [
-          manualId,
-          subject.trim().slice(0, 500),
-          brand,
-          brandObj.email,
-          safePriority,
-          safeEmail,
-          customer_name?.trim().slice(0, 255) || null,
-          issue_category?.trim().slice(0, 255) || null,
-          order_number?.trim().slice(0, 100)   || null,
-        ]
-      );
-    } catch (colErr) {
-      if (colErr.code === 'ER_BAD_FIELD_ERROR') {
-        [result] = await db.query(
-          `INSERT INTO threads
-             (gmail_thread_id, subject, brand, brand_email, status, priority,
-              customer_email, customer_name, issue_category, order_number, is_unread)
-           VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 0)`,
-          [
-            manualId,
-            subject.trim().slice(0, 500),
-            brand,
-            brandObj.email,
-            safePriority,
-            safeEmail,
-            customer_name?.trim().slice(0, 255) || null,
-            issue_category?.trim().slice(0, 255) || null,
-            order_number?.trim().slice(0, 100)   || null,
-          ]
-        );
-      } else {
-        throw colErr;
-      }
-    }
+    // Generate ticket ID: PREFIX-YYYYMMDD-XXXXX
+    const prefix  = (brandObj.label || brand).replace(/[^A-Z0-9]/gi, '').slice(0, 6).toUpperCase();
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const randNum = Math.floor(10000 + Math.random() * 90000);
+    const ticketId = `${prefix}-${dateStr}-${randNum}`;
+
+    // Send initial email to customer — creates a real Gmail thread
+    const { gmailThreadId, gmailMessageId } = await sendInitialEmail(
+      safeEmail,
+      subject.trim().slice(0, 500),
+      description.trim(),
+      brandObj,
+      ticketId
+    );
+
+    // Store thread with real Gmail thread ID
+    const [result] = await db.query(
+      `INSERT INTO threads
+         (gmail_thread_id, subject, brand, brand_email, status, priority,
+          customer_email, customer_name, issue_category, sub_issue, order_number,
+          ticket_id, is_manual, auto_ack_sent, is_unread)
+       VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, 1, 1, 0)`,
+      [
+        gmailThreadId,
+        subject.trim().slice(0, 500),
+        brand,
+        brandObj.email,
+        safePriority,
+        safeEmail,
+        customer_name?.trim().slice(0, 255)  || null,
+        issue_category?.trim().slice(0, 255) || null,
+        sub_issue?.trim().slice(0, 255)      || null,
+        order_number?.trim().slice(0, 100)   || null,
+        ticketId,
+      ]
+    );
 
     const threadId = result.insertId;
 
+    // Save initial outbound message (agent → customer)
     await db.query(
-      `INSERT INTO messages (thread_id, direction, from_email, from_name, body, is_note, sent_at)
-       VALUES (?, 'inbound', ?, ?, ?, 0, NOW())`,
-      [threadId, safeEmail, customer_name?.trim() || safeEmail, description.trim()]
+      `INSERT INTO messages (thread_id, gmail_message_id, direction, from_email, from_name, body, is_note, sent_at)
+       VALUES (?, ?, 'outbound', ?, ?, ?, 0, NOW())`,
+      [threadId, gmailMessageId, brandObj.email, `${brandObj.name} Support`, description.trim()]
     );
 
     const [rows] = await db.query('SELECT * FROM threads WHERE id = ?', [threadId]);
     res.json(rows[0]);
   } catch (err) {
     console.error('Manual ticket creation error:', err);
-    res.status(500).json({ error: 'Failed to create ticket' });
+    res.status(500).json({ error: err.message || 'Failed to create ticket' });
   }
 });
 
