@@ -235,6 +235,7 @@ router.post('/manual', async (req, res) => {
     if (!description?.trim())  return res.status(400).json({ error: 'Initial message is required' });
 
     const brandObj = getBrandByName(brand);
+    console.log('[manual-ticket] brandObj:', JSON.stringify(brandObj));
     if (!brandObj) return res.status(400).json({ error: 'Invalid brand' });
 
     const safePriority = ['normal', 'urgent'].includes(priority) ? priority : 'normal';
@@ -246,6 +247,9 @@ router.post('/manual', async (req, res) => {
     const randNum = Math.floor(10000 + Math.random() * 90000);
     const ticketId = `${prefix}-${dateStr}-${randNum}`;
 
+    console.log('[manual-ticket] ticketId:', ticketId, '| to:', safeEmail, '| subject:', subject?.trim());
+    console.log('[manual-ticket] Calling sendInitialEmail...');
+
     // Send initial email to customer — creates a real Gmail thread
     const { gmailThreadId, gmailMessageId } = await sendInitialEmail(
       safeEmail,
@@ -254,6 +258,7 @@ router.post('/manual', async (req, res) => {
       brandObj,
       ticketId
     );
+    console.log('[manual-ticket] sendInitialEmail OK — gmailThreadId:', gmailThreadId, '| gmailMessageId:', gmailMessageId);
 
     // Store thread with real Gmail thread ID
     const [result] = await db.query(

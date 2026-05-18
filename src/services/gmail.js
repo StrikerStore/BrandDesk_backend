@@ -485,7 +485,18 @@ async function sendReply(gmailThreadId, body, brand, isNote = false, attachments
 }
 
 async function sendInitialEmail(customerEmail, subject, body, brand, ticketId) {
-  const auth = await getAuthenticatedClient();
+  console.log('[sendInitialEmail] START — to:', customerEmail, '| subject:', subject, '| ticketId:', ticketId);
+  console.log('[sendInitialEmail] brand:', JSON.stringify({ name: brand?.name, email: brand?.email, label: brand?.label }));
+
+  let auth;
+  try {
+    auth = await getAuthenticatedClient();
+    console.log('[sendInitialEmail] Gmail auth OK');
+  } catch (authErr) {
+    console.error('[sendInitialEmail] AUTH FAILED:', authErr.message);
+    throw authErr;
+  }
+
   const gmail = google.gmail({ version: 'v1', auth });
 
   const htmlBody = [
@@ -512,10 +523,20 @@ async function sendInitialEmail(customerEmail, subject, body, brand, ticketId) {
   ];
   const raw = Buffer.from(emailLines.join('\r\n')).toString('base64url');
 
-  const sendRes = await gmail.users.messages.send({
-    userId: 'me',
-    requestBody: { raw },
-  });
+  console.log('[sendInitialEmail] Calling Gmail API send...');
+  let sendRes;
+  try {
+    sendRes = await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: { raw },
+    });
+    console.log('[sendInitialEmail] Gmail API response status:', sendRes.status);
+    console.log('[sendInitialEmail] Gmail messageId:', sendRes.data?.id, '| threadId:', sendRes.data?.threadId);
+  } catch (sendErr) {
+    console.error('[sendInitialEmail] GMAIL SEND FAILED:', sendErr.message);
+    console.error('[sendInitialEmail] Gmail error details:', JSON.stringify(sendErr.response?.data || sendErr.errors || {}));
+    throw sendErr;
+  }
 
   return {
     gmailThreadId: sendRes.data.threadId,
