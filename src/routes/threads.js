@@ -4,6 +4,7 @@ const db = require('../config/db');
 const { syncThreads, sendReply, sendInitialEmail } = require('../services/gmail');
 const { getBrandByName } = require('../config/brands');
 const { requireAdmin } = require('../middleware/authMiddleware');
+const { TICKET_PREFIXES } = require('../services/emailParser');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
@@ -242,7 +243,11 @@ router.post('/manual', async (req, res) => {
     const safeEmail    = customer_email.trim().toLowerCase();
 
     // Generate ticket ID: PREFIX-YYYYMMDD-XXXXX
-    const prefix  = (brandObj.label || brand).replace(/[^A-Z0-9]/gi, '').slice(0, 6).toUpperCase();
+    // Look up prefix from TICKET_PREFIXES map (keyed by prefix, valued by brand name)
+    const prefixEntry = Object.entries(TICKET_PREFIXES).find(([, name]) => name === brand);
+    const prefix = prefixEntry
+      ? prefixEntry[0]
+      : brand.replace(/[^A-Za-z]/g, '').slice(0, 4).toUpperCase();
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const randNum = Math.floor(10000 + Math.random() * 90000);
     const ticketId = `${prefix}-${dateStr}-${randNum}`;

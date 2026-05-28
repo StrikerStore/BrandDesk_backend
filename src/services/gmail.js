@@ -187,7 +187,7 @@ async function syncThreads(fullSync = false) {
 
 async function processThread(gmail, gmailThreadId, brand) {
   const [existing] = await db.query(
-    'SELECT id FROM threads WHERE gmail_thread_id = ?',
+    'SELECT id, status FROM threads WHERE gmail_thread_id = ?',
     [gmailThreadId]
   );
 
@@ -275,7 +275,7 @@ async function processThread(gmail, gmailThreadId, brand) {
   if (existing.length) {
     threadId = existing[0].id;
     await db.query(
-      `UPDATE threads SET 
+      `UPDATE threads SET
         is_unread=?, updated_at=NOW(),
         ticket_id=COALESCE(ticket_id, ?),
         order_number=COALESCE(order_number, ?),
@@ -288,6 +288,19 @@ async function processThread(gmail, gmailThreadId, brand) {
        customerPhone, customerCountry, existing[0].id]
     );
     threadId = existing[0].id;
+
+    // Auto-reopen: resolved ticket gets a customer reply → move back to in_progress
+    if (isUnread && existing[0].status === 'resolved') {
+      await db.query(
+        "UPDATE threads SET status='in_progress', status_changed_at=NOW() WHERE id=?",
+        [existing[0].id]
+      );
+      await db.query(
+        `INSERT INTO messages (thread_id, direction, from_email, body, is_note, sent_at)
+         VALUES (?, 'outbound', 'system', '🔄 Ticket reopened — customer replied after resolution.', 1, NOW())`,
+        [existing[0].id]
+      );
+    }
   } else {
     const [result] = await db.query(
       `INSERT INTO threads 
