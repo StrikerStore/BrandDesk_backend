@@ -70,43 +70,6 @@ async function runAutoAck() {
   }
 }
 
-/**
- * Auto-close stale resolved tickets
- * Runs daily at midnight.
- * Archives resolved threads with no new customer message in N days.
- */
-async function runAutoClose() {
-  const enabled = await getSetting('auto_close_enabled', 'false');
-  if (enabled !== 'true') return;
-
-  const days = parseInt(await getSetting('auto_close_days', '7'));
-
-  // Find resolved threads where last customer message is older than N days
-  const [threads] = await db.query(
-    `SELECT t.id, t.subject, t.brand FROM threads t
-     WHERE t.status = 'resolved'
-       AND t.resolved_at IS NOT NULL
-       AND t.resolved_at <= DATE_SUB(NOW(), INTERVAL ? DAY)
-       AND NOT EXISTS (
-         SELECT 1 FROM messages m
-         WHERE m.thread_id = t.id
-           AND m.direction = 'inbound'
-           AND m.sent_at > t.resolved_at
-       )`,
-    [days]
-  );
-
-  if (!threads.length) return;
-
-  for (const thread of threads) {
-    await db.query(
-      `UPDATE threads SET status = 'resolved' WHERE id = ?`,
-      [thread.id]
-    );
-  }
-
-  console.log(`🗄 Auto-close: archived ${threads.length} stale resolved threads`);
-}
 
 /**
  * Auto-resolve in-progress threads with no customer reply
@@ -179,4 +142,4 @@ async function runAutoResolve() {
   console.log(`🤖 Auto-resolve: resolved ${threads.length} in-progress thread(s)`);
 }
 
-module.exports = { runAutoAck, runAutoClose, runAutoResolve };
+module.exports = { runAutoAck, runAutoResolve };

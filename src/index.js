@@ -16,7 +16,7 @@ const ordersRoutes    = require('./routes/orders');
 const aiRoutes        = require('./routes/ai');
 const authRoutes      = require('./routes/auth');
 const { syncThreads, syncFromHistory, seedHistoryId } = require('./services/gmail');
-const { runAutoAck, runAutoClose, runAutoResolve } = require('./services/automation');
+const { runAutoAck, runAutoResolve } = require('./services/automation');
 const { requireAuth, requireAdmin } = require('./middleware/authMiddleware');
 
 const app  = express();
@@ -144,10 +144,6 @@ cron.schedule('*/5 * * * *', async () => {
 cron.schedule('* * * * *', async () => {
   try { await runAutoAck(); }
   catch (err) { console.error('Auto-ack error:', err.message); }
-});
-cron.schedule('0 0 * * *', async () => {
-  try { await runAutoClose(); }
-  catch (err) { console.error('Auto-close error:', err.message); }
 });
 cron.schedule('0 1 * * *', async () => {
   try { await runAutoResolve(); }
