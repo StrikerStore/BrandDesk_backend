@@ -108,4 +108,75 @@ async function runAutoClose() {
   console.log(`🗄 Auto-close: archived ${threads.length} stale resolved threads`);
 }
 
-module.exports = { runAutoAck, runAutoClose };
+/**
+ * Auto-resolve in-progress threads with no customer reply
+ * Runs daily at 1 AM.
+ * Finds in-progress threads where we sent a mail and the customer hasn't replied
+ * in N days — resolves them automatically with a system comment.
+ */
+async function runAutoResolve() {
+  const enabled = await getSetting('auto_resolve_enabled', 'false');
+  if (enabled !== 'true') return;
+
+  const days = parseInt(await getSetting('auto_resolve_days', '7'));
+
+  // Find in_progress threads where:
+  // - At least one real outbound message has been sent (not a note)
+  // - No inbound message has arrived after the last outbound
+  // - The last outbound was sent more than N days ago
+  const [threads] = await db.query(
+    `SELECT t.id, t.subject, t.brand FROM threads t
+     WHERE t.status = 'in_progress'
+       AND EXISTS (
+         SELECT 1 FROM messages m
+         WHERE m.thread_id = t.id AND m.direction = 'outbound' AND m.is_note = 0
+       )
+       AND (
+         SELECT MAX(m.sent_at) FROM messages m
+         WHERE m.thread_id = t.id AND m.direction = 'outbound' AND m.is_note = 0
+       ) <= DATE_SUB(NOW(), INTERVAL ? DAY)
+       AND NOT EXISTS (
+         SELECT 1 FROM messages m2
+         WHERE m2.thread_id = t.id
+           AND m2.direction = 'inbound'
+           AND m2.sent_at > (
+             SELECT MAX(m3.sent_at) FROM messages m3
+             WHERE m3.thread_id = t.id AND m3.direction = 'outbound' AND m3.is_note = 0
+           )
+       )`,
+    [days]
+  );
+
+  if (!threads.length) return;
+
+  const note = `Auto-resolved: No customer reply received within ${days} day${days !== 1 ? 's' : ''} of our last outbound message.`;
+
+  for (const thread of threads) {
+    try {
+      await db.query(
+        `UPDATE threads SET
+          status = 'resolved',
+          status_changed_at = NOW(),
+          resolved_by = 'system',
+          resolution_note = ?,
+          resolved_at = NOW()
+         WHERE id = ?`,
+        [note, thread.id]
+      );
+
+      await db.query(
+        `INSERT INTO messages (thread_id, direction, from_email, body, is_note, sent_at)
+         VALUES (?, 'outbound', 'system', ?, 1, NOW())`,
+        [thread.id, `🤖 ${note}`]
+      );
+
+      console.log(`✅ Auto-resolved thread #${thread.id} (${thread.brand})`);
+    } catch (err) {
+      console.error(`⚠ Auto-resolve failed for thread #${thread.id}:`, err.message);
+    }
+  }
+
+  console.log(`🤖 Auto-resolve: resolved ${threads.length} in-progress thread(s)`);
+}
+
+module.exports = { runAutoAck, runAutoClose, runAutoResolve };

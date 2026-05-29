@@ -1,6 +1,6 @@
 const express = require('express');
 const { getAllSettings, setSetting } = require('../services/settings');
-const { runAutoAck, runAutoClose } = require('../services/automation');
+const { runAutoAck, runAutoClose, runAutoResolve } = require('../services/automation');
 const { requireAdmin } = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -44,6 +44,16 @@ router.post('/test-auto-close', requireAdmin, async (req, res) => {
   try {
     await runAutoClose();
     res.json({ success: true, message: 'Auto-close run complete' });
+  } catch (err) {
+    res.status(500).json({ error: 'Settings operation failed' });
+  }
+});
+
+// POST /api/settings/test-auto-resolve — manually trigger auto-resolve (admin only)
+router.post('/test-auto-resolve', requireAdmin, async (req, res) => {
+  try {
+    await runAutoResolve();
+    res.json({ success: true, message: 'Auto-resolve run complete' });
   } catch (err) {
     res.status(500).json({ error: 'Settings operation failed' });
   }
