@@ -23,9 +23,9 @@ router.get('/', async (req, res) => {
     if (priority) { where += ' AND t.priority = ?'; params.push(priority); }
     if (tag) { where += ' AND JSON_CONTAINS(t.tags, ?)'; params.push(JSON.stringify(tag)); }
     if (search) {
-      where += ` AND (t.customer_name LIKE ? OR t.customer_email LIKE ? OR t.ticket_id LIKE ? OR t.order_number LIKE ? OR t.subject LIKE ?)`;
+      where += ` AND (t.customer_name LIKE ? OR t.customer_email LIKE ? OR t.ticket_id LIKE ? OR t.order_number LIKE ? OR t.subject LIKE ? OR t.tags LIKE ?)`;
       const q = `%${search}%`;
-      params.push(q, q, q, q, q);
+      params.push(q, q, q, q, q, q);
     }
 
     const [threads] = await db.query(
