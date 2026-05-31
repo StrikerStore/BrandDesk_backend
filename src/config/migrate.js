@@ -220,6 +220,33 @@ async function migrate() {
     )
   `);
 
+  // ── Thread Actions (v10) ─────────────────────────────────
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS thread_actions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      thread_id INT NOT NULL,
+      action_type ENUM('exchange', 'return', 'alternate_product') NOT NULL,
+      pickup_jersey VARCHAR(255),
+      exchange_jersey VARCHAR(255),
+      alternate_jersey VARCHAR(255),
+      exchange_order_id VARCHAR(100),
+      exchange_pickup_done TINYINT(1) DEFAULT 0,
+      exchange_packed TINYINT(1) DEFAULT 0,
+      return_created TINYINT(1) DEFAULT 0,
+      return_received TINYINT(1) DEFAULT 0,
+      refund_done TINYINT(1) DEFAULT 0,
+      refund_id VARCHAR(100),
+      refund_time VARCHAR(100),
+      alt_order_created TINYINT(1) DEFAULT 0,
+      original_order_cancelled TINYINT(1) DEFAULT 0,
+      is_closed TINYINT(1) DEFAULT 0,
+      closed_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+      INDEX idx_thread_id (thread_id)
+    )
+  `);
+
   // ── Fulltext indexes (v3) ─────────────────────────────────
   try {
     await conn.query(`ALTER TABLE threads ADD FULLTEXT INDEX ft_threads (subject, customer_name, customer_email, ticket_id, order_number, issue_category)`);
