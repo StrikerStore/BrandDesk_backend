@@ -225,7 +225,7 @@ async function migrate() {
     CREATE TABLE IF NOT EXISTS thread_actions (
       id INT AUTO_INCREMENT PRIMARY KEY,
       thread_id INT NOT NULL,
-      action_type ENUM('exchange', 'return', 'alternate_product') NOT NULL,
+      action_type ENUM('exchange', 'return', 'alternate_product', 'refund') NOT NULL,
       pickup_jersey VARCHAR(255),
       exchange_jersey VARCHAR(255),
       alternate_jersey VARCHAR(255),
@@ -246,6 +246,12 @@ async function migrate() {
       INDEX idx_thread_id (thread_id)
     )
   `);
+  // v11 — add 'refund' to action_type ENUM (safe to re-run, ignored if already present)
+  try {
+    await conn.query(`ALTER TABLE thread_actions MODIFY COLUMN action_type ENUM('exchange','return','alternate_product','refund') NOT NULL`);
+  } catch (err) {
+    if (!err.message?.includes('Duplicate')) console.log('  ⚠ thread_actions ENUM update:', err.message);
+  }
 
   // ── Fulltext indexes (v3) ─────────────────────────────────
   try {

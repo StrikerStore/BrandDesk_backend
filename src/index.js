@@ -15,7 +15,7 @@ const usersRoutes     = require('./routes/users');
 const ordersRoutes    = require('./routes/orders');
 const aiRoutes        = require('./routes/ai');
 const authRoutes      = require('./routes/auth');
-const actionsRoutes   = require('./routes/actions');
+const { threadRouter: actionsRoutes, globalRouter: actionsGlobal } = require('./routes/actions');
 const { syncThreads, syncFromHistory, seedHistoryId } = require('./services/gmail');
 const { runAutoAck, runAutoResolve } = require('./services/automation');
 const { requireAuth, requireAdmin } = require('./middleware/authMiddleware');
@@ -83,6 +83,7 @@ app.use('/auth', authRoutes);
 // ── Protected API routes ──────────────────────────────────────
 app.use('/api/threads',   requireAuth, threadRoutes);
 app.use('/api/threads/:threadId/actions', requireAuth, actionsRoutes);
+app.use('/api/actions', requireAuth, actionsGlobal);
 app.use('/api/customers', requireAuth, customerRoutes);
 app.use('/api/templates', requireAuth, templateRoutes);
 app.use('/api/brands',    requireAuth, brandRoutes);
