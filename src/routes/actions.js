@@ -20,13 +20,14 @@ router.get('/', async (req, res) => {
 
 // POST /api/threads/:threadId/actions
 router.post('/', async (req, res) => {
-  const { action_type, pickup_jersey, exchange_jersey, alternate_jersey } = req.body;
+  const { action_type, pickup_jersey, exchange_jersey, alternate_jersey,
+          current_jersey, new_jersey, new_address } = req.body;
 
-  if (!['exchange', 'return', 'alternate_product', 'refund'].includes(action_type)) {
+  if (!['exchange', 'return', 'alternate_product', 'refund', 'change_size', 'change_address'].includes(action_type)) {
     return res.status(400).json({ error: 'Invalid action_type' });
   }
-  // pickup_jersey required for all types except pure refund
-  if (action_type !== 'refund' && !pickup_jersey?.trim()) {
+  // pickup_jersey required for the pickup-based types
+  if (['exchange', 'return', 'alternate_product'].includes(action_type) && !pickup_jersey?.trim()) {
     return res.status(400).json({ error: 'pickup_jersey is required' });
   }
   if (action_type === 'exchange' && !exchange_jersey?.trim()) {
@@ -35,18 +36,31 @@ router.post('/', async (req, res) => {
   if (action_type === 'alternate_product' && !alternate_jersey?.trim()) {
     return res.status(400).json({ error: 'alternate_jersey is required for alternate product' });
   }
+  if (action_type === 'change_size' && !current_jersey?.trim()) {
+    return res.status(400).json({ error: 'current_jersey is required for change size' });
+  }
+  if (action_type === 'change_size' && !new_jersey?.trim()) {
+    return res.status(400).json({ error: 'new_jersey is required for change size' });
+  }
+  if (action_type === 'change_address' && !new_address?.trim()) {
+    return res.status(400).json({ error: 'new_address is required for change address' });
+  }
 
   try {
     const [result] = await db.query(
       `INSERT INTO thread_actions
-        (thread_id, action_type, pickup_jersey, exchange_jersey, alternate_jersey)
-       VALUES (?, ?, ?, ?, ?)`,
+        (thread_id, action_type, pickup_jersey, exchange_jersey, alternate_jersey,
+         current_jersey, new_jersey, new_address)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         req.params.threadId,
         action_type,
-        pickup_jersey.trim(),
+        pickup_jersey?.trim() || null,
         exchange_jersey?.trim() || null,
         alternate_jersey?.trim() || null,
+        current_jersey?.trim() || null,
+        new_jersey?.trim() || null,
+        new_address?.trim() || null,
       ]
     );
     const [rows] = await db.query('SELECT * FROM thread_actions WHERE id = ?', [result.insertId]);
@@ -60,9 +74,12 @@ router.post('/', async (req, res) => {
 // PATCH /api/threads/:threadId/actions/:actionId
 router.patch('/:actionId', async (req, res) => {
   const ALLOWED = [
+    'pickup_jersey', 'exchange_jersey', 'alternate_jersey',
+    'current_jersey', 'new_jersey', 'new_address',
     'exchange_order_id', 'exchange_pickup_done', 'exchange_packed',
     'return_created', 'return_received', 'refund_done', 'refund_id', 'refund_time',
     'alt_order_created', 'original_order_cancelled',
+    'size_change_done', 'address_change_done',
   ];
   const updates = {};
   for (const key of ALLOWED) {
@@ -115,7 +132,7 @@ globalRouter.get('/', async (req, res) => {
 
     if (status === 'open')   { where += ' AND ta.is_closed = 0'; }
     if (status === 'closed') { where += ' AND ta.is_closed = 1'; }
-    if (type && ['exchange', 'return', 'alternate_product', 'refund'].includes(type)) {
+    if (type && ['exchange', 'return', 'alternate_product', 'refund', 'change_size', 'change_address'].includes(type)) {
       where += ' AND ta.action_type = ?';
       params.push(type);
     }
@@ -146,9 +163,12 @@ globalRouter.get('/', async (req, res) => {
 // PATCH /api/actions/:actionId  — update status fields (from consolidated view)
 globalRouter.patch('/:actionId', async (req, res) => {
   const ALLOWED = [
+    'pickup_jersey', 'exchange_jersey', 'alternate_jersey',
+    'current_jersey', 'new_jersey', 'new_address',
     'exchange_order_id', 'exchange_pickup_done', 'exchange_packed',
     'return_created', 'return_received', 'refund_done', 'refund_id', 'refund_time',
     'alt_order_created', 'original_order_cancelled',
+    'size_change_done', 'address_change_done',
   ];
   const updates = {};
   for (const key of ALLOWED) {

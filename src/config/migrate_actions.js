@@ -8,11 +8,14 @@ async function migrate() {
     CREATE TABLE IF NOT EXISTS thread_actions (
       id INT AUTO_INCREMENT PRIMARY KEY,
       thread_id INT NOT NULL,
-      action_type ENUM('exchange', 'return', 'alternate_product') NOT NULL,
+      action_type ENUM('exchange', 'return', 'alternate_product', 'refund', 'change_size', 'change_address') NOT NULL,
 
       pickup_jersey VARCHAR(255),
       exchange_jersey VARCHAR(255),
       alternate_jersey VARCHAR(255),
+      current_jersey VARCHAR(255),
+      new_jersey VARCHAR(255),
+      new_address VARCHAR(500),
 
       -- Exchange status
       exchange_order_id VARCHAR(100),
@@ -29,6 +32,10 @@ async function migrate() {
       -- Alternate product status
       alt_order_created TINYINT(1) DEFAULT 0,
       original_order_cancelled TINYINT(1) DEFAULT 0,
+
+      -- Change size / address status
+      size_change_done TINYINT(1) DEFAULT 0,
+      address_change_done TINYINT(1) DEFAULT 0,
 
       is_closed TINYINT(1) DEFAULT 0,
       closed_at DATETIME,
