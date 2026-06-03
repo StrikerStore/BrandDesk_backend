@@ -26,8 +26,8 @@ router.post('/', async (req, res) => {
   if (!['exchange', 'return', 'alternate_product', 'refund', 'change_size', 'change_address'].includes(action_type)) {
     return res.status(400).json({ error: 'Invalid action_type' });
   }
-  // pickup_jersey required for the pickup-based types
-  if (['exchange', 'return', 'alternate_product'].includes(action_type) && !pickup_jersey?.trim()) {
+  // pickup_jersey required for the pickup-based types and for refund (the jersey being refunded)
+  if (['exchange', 'return', 'alternate_product', 'refund'].includes(action_type) && !pickup_jersey?.trim()) {
     return res.status(400).json({ error: 'pickup_jersey is required' });
   }
   if (action_type === 'exchange' && !exchange_jersey?.trim()) {
