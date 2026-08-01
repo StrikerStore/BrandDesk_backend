@@ -18,6 +18,8 @@ async function runAutoAck() {
   // Find threads that:
   // - are open
   // - have no outbound messages sent yet
+  // - have no reply sitting in the recall window (it hasn't hit `messages` yet,
+  //   so without this the agent's reply and an auto-ack both reach the customer)
   // - were created more than delay_minutes ago
   // - haven't had auto_ack_sent yet
   const [threads] = await db.query(
@@ -28,6 +30,10 @@ async function runAutoAck() {
        AND NOT EXISTS (
          SELECT 1 FROM messages m
          WHERE m.thread_id = t.id AND m.direction = 'outbound' AND m.is_note = 0
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM pending_sends p
+         WHERE p.thread_id = t.id AND p.status IN ('queued', 'sending')
        )`,
     [delayMins]
   );

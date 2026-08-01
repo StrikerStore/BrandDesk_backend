@@ -5,7 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "npm run db:deploy && node src/index.js",
-    "dev": "nodemon src/index.js",
+    "dev": "npm run db:migrate && nodemon src/index.js",
     "db:deploy": "npm run db:migrate",
     "db:migrate": "node src/config/migrate.js",
     "db:reset": "node src/config/reset.js"

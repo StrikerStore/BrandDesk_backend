@@ -1,10 +1,18 @@
 const express = require('express');
 const multer  = require('multer');
+const crypto  = require('crypto');
 const db = require('../config/db');
 const { syncThreads, sendReply, sendInitialEmail } = require('../services/gmail');
 const { getBrandByName } = require('../config/brands');
 const { requireAdmin } = require('../middleware/authMiddleware');
 const { TICKET_PREFIXES } = require('../services/emailParser');
+const {
+  getRecallWindowSeconds,
+  queueReply,
+  queueInitialEmail,
+  listPendingForThread,
+  countActiveSends,
+} = require('../services/sendQueue');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
@@ -36,7 +44,7 @@ router.get('/', async (req, res) => {
        WHERE ${where}
        ORDER BY
          CASE t.priority WHEN 'urgent' THEN 1 ELSE 2 END ASC,
-         last_message_at DESC
+         COALESCE(last_message_at, t.created_at) DESC
        LIMIT ? OFFSET ?`,
       [...params, parseInt(limit), offset]
     );
@@ -103,8 +111,13 @@ router.get('/:id', async (req, res) => {
       attachments: attachMap[m.id] || [],
     }));
 
+    // Emails still inside their recall window have no `messages` row yet, so
+    // the client gets them from here — that's what makes the Undo affordance
+    // survive a refresh or a background poll.
+    const pending = await listPendingForThread(req.params.id);
+
     await db.query('UPDATE threads SET is_unread = 0 WHERE id = ?', [req.params.id]);
-    res.json({ thread: threads[0], messages: messagesWithAttachments });
+    res.json({ thread: threads[0], messages: messagesWithAttachments, pending });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch thread' });
   }
@@ -252,21 +265,13 @@ router.post('/manual', async (req, res) => {
     const randNum = Math.floor(10000 + Math.random() * 90000);
     const ticketId = `${prefix}-${dateStr}-${randNum}`;
 
-    console.log('[manual-ticket] ticketId:', ticketId, '| to:', safeEmail, '| subject:', subject?.trim());
-    console.log('[manual-ticket] Calling sendInitialEmail...');
+    const safeSubject = subject.trim().slice(0, 500);
+    const safeBody    = description.trim();
+    const win = await getRecallWindowSeconds();
 
-    // Send initial email to customer — creates a real Gmail thread
-    const { gmailThreadId, gmailMessageId } = await sendInitialEmail(
-      safeEmail,
-      subject.trim().slice(0, 500),
-      description.trim(),
-      brandObj,
-      ticketId
-    );
-    console.log('[manual-ticket] sendInitialEmail OK — gmailThreadId:', gmailThreadId, '| gmailMessageId:', gmailMessageId);
+    console.log('[manual-ticket] ticketId:', ticketId, '| to:', safeEmail, '| subject:', safeSubject, '| window:', win);
 
-    // Store thread with real Gmail thread ID
-    const [result] = await db.query(
+    const insertThread = (gmailThreadId) => db.query(
       `INSERT INTO threads
          (gmail_thread_id, subject, brand, brand_email, status, priority,
           customer_email, customer_name, issue_category, sub_issue, order_number,
@@ -274,7 +279,7 @@ router.post('/manual', async (req, res) => {
        VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, 1, 1, 0)`,
       [
         gmailThreadId,
-        subject.trim().slice(0, 500),
+        safeSubject,
         brand,
         brandObj.email,
         safePriority,
@@ -287,17 +292,43 @@ router.post('/manual', async (req, res) => {
       ]
     );
 
+    // Recall disabled — original behaviour, send first and store the real IDs.
+    if (win === 0) {
+      console.log('[manual-ticket] Calling sendInitialEmail...');
+      const { gmailThreadId, gmailMessageId } = await sendInitialEmail(
+        safeEmail, safeSubject, safeBody, brandObj, ticketId
+      );
+      console.log('[manual-ticket] sendInitialEmail OK — gmailThreadId:', gmailThreadId, '| gmailMessageId:', gmailMessageId);
+
+      const [result] = await insertThread(gmailThreadId);
+      await db.query(
+        `INSERT INTO messages (thread_id, gmail_message_id, direction, from_email, from_name, body, is_note, sent_at)
+         VALUES (?, ?, 'outbound', ?, ?, ?, 0, NOW())`,
+        [result.insertId, gmailMessageId, brandObj.email, `${brandObj.name} Support`, safeBody]
+      );
+      const [rows] = await db.query('SELECT * FROM threads WHERE id = ?', [result.insertId]);
+      return res.json(rows[0]);
+    }
+
+    // Recall window: the real Gmail thread ID doesn't exist until the send
+    // flushes, so the ticket gets a placeholder and shows in the inbox right
+    // away. sendQueue swaps in the real ID on flush, or deletes this row on undo.
+    const placeholderId = `pending_${crypto.randomBytes(12).toString('hex')}`;
+    const [result] = await insertThread(placeholderId);
     const threadId = result.insertId;
 
-    // Save initial outbound message (agent → customer)
-    await db.query(
-      `INSERT INTO messages (thread_id, gmail_message_id, direction, from_email, from_name, body, is_note, sent_at)
-       VALUES (?, ?, 'outbound', ?, ?, ?, 0, NOW())`,
-      [threadId, gmailMessageId, brandObj.email, `${brandObj.name} Support`, description.trim()]
-    );
+    const queued = await queueInitialEmail({
+      threadId,
+      toEmail: safeEmail,
+      subject: safeSubject,
+      body: safeBody,
+      brand: brandObj,
+      ticketId,
+      userId: req.user?.id,
+    });
 
     const [rows] = await db.query('SELECT * FROM threads WHERE id = ?', [threadId]);
-    res.json(rows[0]);
+    res.json({ ...rows[0], pending_send_id: queued.pendingSendId, scheduled_for: queued.scheduledFor });
   } catch (err) {
     console.error('Manual ticket creation error:', err);
     res.status(500).json({ error: err.message || 'Failed to create ticket' });
@@ -335,10 +366,35 @@ router.post('/:gmailId/reply', upload.array('attachments', 10), async (req, res)
       return res.json({ success: true, isManual: true });
     }
 
+    // The parent ticket is still inside its own recall window, so there's no
+    // Gmail thread to reply into yet.
+    if (req.params.gmailId.startsWith('pending_')) {
+      return res.status(409).json({ error: 'This ticket is still sending. Undo it or wait a moment.' });
+    }
+
     const brand = getBrandByName(brandName);
     if (!brand) return res.status(400).json({ error: 'Invalid brand' });
     const attachments = req.files || [];
-    const result = await sendReply(req.params.gmailId, body, brand, isNote, attachments);
+
+    // Internal notes are never emailed, so there is nothing to recall.
+    if (isNote) {
+      const result = await sendReply(req.params.gmailId, body, brand, true, attachments);
+      return res.json(result);
+    }
+
+    const [threadRows] = await db.query(
+      'SELECT id FROM threads WHERE gmail_thread_id = ?', [req.params.gmailId]
+    );
+    if (!threadRows.length) return res.status(404).json({ error: 'Thread not found' });
+
+    const result = await queueReply({
+      threadId: threadRows[0].id,
+      gmailThreadId: req.params.gmailId,
+      body,
+      brand,
+      attachments,
+      userId: req.user?.id,
+    });
     res.json(result);
   } catch (err) {
     console.error('Reply error:', err);
@@ -349,6 +405,14 @@ router.post('/:gmailId/reply', upload.array('attachments', 10), async (req, res)
 // POST /api/threads/resync — admin only, full wipe and re-parse
 router.post('/resync', requireAdmin, async (req, res) => {
   try {
+    // pending_sends cascades off threads, so resyncing mid-window would
+    // silently destroy emails nobody knows are queued.
+    const active = await countActiveSends();
+    if (active > 0) {
+      return res.status(409).json({
+        error: `${active} email(s) are waiting to send. Try again in a moment.`,
+      });
+    }
     await db.query('DELETE FROM messages');
     await db.query('DELETE FROM threads');
     const result = await syncThreads(true);

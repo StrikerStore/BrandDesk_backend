@@ -15,9 +15,11 @@ const usersRoutes     = require('./routes/users');
 const ordersRoutes    = require('./routes/orders');
 const aiRoutes        = require('./routes/ai');
 const authRoutes      = require('./routes/auth');
+const sendsRoutes     = require('./routes/sends');
 const { threadRouter: actionsRoutes, globalRouter: actionsGlobal } = require('./routes/actions');
 const { syncThreads, syncFromHistory, seedHistoryId } = require('./services/gmail');
 const { runAutoAck, runAutoResolve } = require('./services/automation');
+const { flushDueSends } = require('./services/sendQueue');
 const { requireAuth, requireAdmin } = require('./middleware/authMiddleware');
 
 const app  = express();
@@ -92,6 +94,7 @@ app.use('/api/views',     requireAuth, viewsRoutes);
 app.use('/api/settings',  requireAuth, settingsRoutes);
 app.use('/api/orders',    requireAuth, ordersRoutes);
 app.use('/api/ai',        requireAuth, aiRoutes);
+app.use('/api/sends',     requireAuth, sendsRoutes);
 
 // Manual sync — uses fast history sync, full resync for admins
 app.post('/api/sync', requireAuth, async (req, res) => {
@@ -138,6 +141,19 @@ setInterval(async () => {
   catch (err) { if (!err.message?.includes('Not authenticated')) console.error('History sync error:', err.message); }
   finally { historyPollRunning = false; }
 }, 15000);
+
+// Flush due recall-window sends every 10s. Each queued send also has its own
+// in-process timer; this sweeper is the safety net that picks up rows orphaned
+// by a restart, and the only thing that flushes rows queued on another replica.
+// 10s (not cron's 1-min granularity) keeps "Sending…" from visibly hanging.
+let flushRunning = false;
+setInterval(async () => {
+  if (flushRunning) return;
+  flushRunning = true;
+  try { await flushDueSends(); }
+  catch (err) { console.error('Send queue flush error:', err.message); }
+  finally { flushRunning = false; }
+}, 10000);
 
 // Full sync fallback every 5 min (catches anything history missed)
 cron.schedule('*/5 * * * *', async () => {

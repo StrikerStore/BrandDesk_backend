@@ -184,6 +184,7 @@ async function migrate() {
     ['auto_ack_delay_minutes', '5'],
     ['auto_close_enabled',     'false'],
     ['auto_close_days',        '7'],
+    ['recall_window_seconds',  '30'],
   ];
   for (const [key, value] of defaults) {
     await conn.query(`INSERT IGNORE INTO settings (key_name, value) VALUES (?, ?)`, [key, value]);
@@ -269,6 +270,49 @@ async function migrate() {
   await addColumn(conn, 'thread_actions', 'new_address', 'VARCHAR(500)');
   await addColumn(conn, 'thread_actions', 'size_change_done', 'TINYINT(1) DEFAULT 0');
   await addColumn(conn, 'thread_actions', 'address_change_done', 'TINYINT(1) DEFAULT 0');
+
+  // ── Pending Sends (v13) — undo-send / recall window ──────
+  // Deliberately NOT stored in `messages`: POST /api/threads/resync wipes that
+  // table, and a queued email must survive it.
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS pending_sends (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      kind ENUM('reply','manual') NOT NULL,
+      thread_id INT NOT NULL,
+      brand_name VARCHAR(100) NOT NULL,
+      to_email VARCHAR(255) NULL,
+      subject VARCHAR(500) NULL,
+      ticket_id VARCHAR(100) NULL,
+      body MEDIUMTEXT NOT NULL,
+      attachment_count INT NOT NULL DEFAULT 0,
+      status ENUM('queued','sending','sent','cancelled','failed') NOT NULL DEFAULT 'queued',
+      scheduled_for DATETIME NOT NULL,
+      claimed_at DATETIME NULL,
+      attempts INT NOT NULL DEFAULT 0,
+      created_by INT NULL,
+      error TEXT NULL,
+      sent_at DATETIME NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_status_sched (status, scheduled_for),
+      INDEX idx_thread_status (thread_id, status),
+      FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+    )
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS pending_send_attachments (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      pending_send_id INT NOT NULL,
+      filename VARCHAR(500) NOT NULL,
+      mime_type VARCHAR(150) NOT NULL,
+      size INT NOT NULL DEFAULT 0,
+      content LONGBLOB NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_pending_send_id (pending_send_id),
+      FOREIGN KEY (pending_send_id) REFERENCES pending_sends(id) ON DELETE CASCADE
+    )
+  `);
 
   // ── Fulltext indexes (v3) ─────────────────────────────────
   try {
