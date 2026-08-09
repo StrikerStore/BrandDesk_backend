@@ -5,7 +5,7 @@ const {
   parseFilters,
   getOverview, getVolume, getResponseTime,
   getByBrand, getByIssue, getActionStats,
-  getAgentStats, getSlaBacklog,
+  getAgentStats, getResolvedByName, getSlaBacklog,
 } = require('../services/analyticsQueries');
 const { buildWorkbook, workbookFilename } = require('../services/analyticsExport');
 
@@ -37,6 +37,10 @@ router.get('/actions',       handle('actions',       getActionStats));
 // Admins see every agent; an agent sees only their own row. The scoping is
 // applied in parseFilters from req.user, never from the query string.
 router.get('/agents',        handle('agents',        getAgentStats));
+
+// Leaderboard on the typed `resolved_by` name — covers all history, unlike
+// /agents which only sees activity recorded since attribution shipped.
+router.get('/resolved-by',   handle('resolved-by',   getResolvedByName));
 
 // Most-used reply templates
 router.get('/templates', async (req, res) => {

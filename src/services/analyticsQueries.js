@@ -396,6 +396,47 @@ async function getAgentStats(f) {
   return out.sort((a, b) => (b.resolved - a.resolved) || (b.replies - a.replies));
 }
 
+/**
+ * Resolution leaderboard grouped on the free-text `resolved_by` name.
+ *
+ * Complements getAgentStats rather than replacing it: this one covers the full
+ * history (the name has always been recorded) but can only ever count
+ * resolutions, since messages and thread_actions carry no name to group on.
+ *
+ * Grouped case/whitespace-insensitively so "keval" and " Keval" merge, and
+ * `variants` surfaces when one person has been recorded under several
+ * spellings instead of quietly hiding it.
+ *
+ * The agent filter is deliberately NOT applied — it selects a user id, and
+ * matching that back to free text would produce a number that silently
+ * disagrees with the Agent performance table.
+ */
+async function getResolvedByName(f) {
+  const w = threadWhere({ ...f, agentId: null }, { dateCol: 'resolved_at' });
+  const [rows] = await db.query(`
+    SELECT MAX(TRIM(t.resolved_by)) AS name,
+      COUNT(*) AS total,
+      COUNT(DISTINCT TRIM(t.resolved_by)) AS variants,
+      ROUND(AVG(t.first_response_minutes)) AS avg_response_mins,
+      ROUND(AVG(TIMESTAMPDIFF(MINUTE, t.created_at, t.resolved_at))) AS avg_resolution_mins
+    FROM threads t
+    WHERE t.status='resolved' AND t.resolved_by IS NOT NULL AND TRIM(t.resolved_by) != ''
+      AND ${w.sql}
+    GROUP BY LOWER(TRIM(t.resolved_by))
+    ORDER BY total DESC
+  `, w.params);
+
+  return rows.map(r => ({
+    name: r.name,
+    total: Number(r.total),
+    variants: Number(r.variants),
+    // 'system' is written by the auto-resolve cron, not a person
+    is_system: String(r.name).toLowerCase() === 'system',
+    avg_response_mins:   Number(r.avg_response_mins || 0),
+    avg_resolution_mins: Number(r.avg_resolution_mins || 0),
+  }));
+}
+
 // ── Live SLA backlog ────────────────────────────────────────────────────────
 
 async function getSlaBacklog(f) {
@@ -471,6 +512,6 @@ module.exports = {
   parseFilters,
   getOverview, getVolume, getResponseTime,
   getByBrand, getByIssue, getActionStats,
-  getAgentStats, getSlaBacklog,
+  getAgentStats, getResolvedByName, getSlaBacklog,
   getTicketRows, getActionRows,
 };

@@ -7,7 +7,7 @@
 const ExcelJS = require('exceljs');
 const {
   getOverview, getByBrand, getByIssue, getActionStats,
-  getAgentStats, getTicketRows, getActionRows,
+  getAgentStats, getResolvedByName, getTicketRows, getActionRows,
 } = require('./analyticsQueries');
 
 const HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F2937' } };
@@ -49,9 +49,9 @@ function workbookFilename(f) {
 }
 
 async function buildWorkbook(f) {
-  const [overview, byBrand, byIssue, actionStats, agents, tickets, actionRows] = await Promise.all([
+  const [overview, byBrand, byIssue, actionStats, agents, resolvedByName, tickets, actionRows] = await Promise.all([
     getOverview(f), getByBrand(f), getByIssue(f), getActionStats(f),
-    getAgentStats(f), getTicketRows(f), getActionRows(f),
+    getAgentStats(f), getResolvedByName(f), getTicketRows(f), getActionRows(f),
   ]);
 
   const wb = new ExcelJS.Workbook();
@@ -172,6 +172,25 @@ async function buildWorkbook(f) {
     rt:  row.avg_resolution_mins || null,
   }));
   finishSheet(a);
+
+  // ── Resolved by (name) ────────────────────────────────────────────────────
+  // Grouped on the typed name, so this covers the full history
+  const rb = wb.addWorksheet('Resolved by');
+  rb.columns = [
+    { header: 'Resolved by (name entered)', key: 'name',     width: 28 },
+    { header: 'Tickets resolved',           key: 'total',    width: 18 },
+    { header: 'Name variants merged',       key: 'variants', width: 22 },
+    { header: 'Avg first response (mins)',  key: 'frt',      width: 24 },
+    { header: 'Avg resolution (mins)',      key: 'rt',       width: 22 },
+  ];
+  resolvedByName.forEach(row => rb.addRow({
+    name: row.is_system ? 'system (auto-resolved)' : row.name,
+    total: row.total,
+    variants: row.variants > 1 ? row.variants : '',
+    frt: row.avg_response_mins || null,
+    rt:  row.avg_resolution_mins || null,
+  }));
+  finishSheet(rb);
 
   // ── Actions ───────────────────────────────────────────────────────────────
   const ac = wb.addWorksheet('Actions');
