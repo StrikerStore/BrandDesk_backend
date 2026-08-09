@@ -1,7 +1,69 @@
 const express = require('express');
 const { getOrderDb } = require('../config/orderDb');
+const { normalizeOrderInput, sameDigits } = require('../services/orderId');
 
 const router = express.Router();
+
+const CANDIDATE_COLS = `o.order_id, o.order_date, o.customer_name, o.account_code, l.current_shipment_status`;
+const CANDIDATE_FROM = `FROM orders o LEFT JOIN labels l ON l.order_id = o.order_id`;
+
+/**
+ * Map whatever the customer typed onto a canonical order_id.
+ *
+ * Tried in order of confidence. Returns { orderId, matchedBy, candidates } —
+ * orderId is null when nothing matched, and candidates carries near-misses for
+ * the agent to pick from.
+ */
+async function resolveOrderId(db, raw, { email } = {}) {
+  const { cleaned, digits, prefix } = normalizeOrderInput(raw);
+  if (!cleaned) return { orderId: null, matchedBy: null, candidates: [] };
+
+  // 1. Exact — covers every already-correct value at no extra cost
+  const [exact] = await db.query('SELECT order_id FROM orders WHERE order_id = ? LIMIT 1', [cleaned]);
+  if (exact.length) return { orderId: exact[0].order_id, matchedBy: 'exact', candidates: [] };
+
+  // Without a clean digit run there is nothing safe to pattern-match on
+  if (!digits || !/^\d+$/.test(digits)) return { orderId: null, matchedBy: null, candidates: [] };
+
+  // 2. This customer's own orders — strongest signal available, and it needs
+  //    no per-store prefix configuration (there isn't any in this codebase)
+  if (email) {
+    const [mine] = await db.query(
+      `SELECT DISTINCT ${CANDIDATE_COLS}
+       ${CANDIDATE_FROM}
+       LEFT JOIN customer_info ci ON ci.order_id = o.order_id
+       WHERE ci.email = ? AND o.order_id NOT LIKE '%\\_%'
+       ORDER BY o.order_date DESC LIMIT 50`,
+      [String(email).toLowerCase().trim()]
+    );
+    const hits = mine.filter(o => {
+      const n = normalizeOrderInput(o.order_id);
+      if (!sameDigits(n.digits, digits)) return false;
+      return prefix ? n.prefix === prefix : true;
+    });
+    if (hits.length === 1) return { orderId: hits[0].order_id, matchedBy: 'customer', candidates: [] };
+    if (hits.length > 1)   return { orderId: null, matchedBy: null, candidates: hits.slice(0, 10) };
+  }
+
+  // 3. Pattern across all orders. `digits` is proven numeric above, so it is
+  //    safe to inline — nothing else ever reaches the REGEXP literal.
+  //    Unindexed, hence the LIMIT.
+  // Strip the customer's own leading zeros too, so "04334" still finds DS4334
+  const pattern = `^[A-Za-z]*0*${digits.replace(/^0+/, '') || '0'}$`;
+  const [matches] = await db.query(
+    `SELECT DISTINCT ${CANDIDATE_COLS}
+     ${CANDIDATE_FROM}
+     WHERE o.order_id REGEXP ? AND o.order_id NOT LIKE '%\\_%'
+     ORDER BY o.order_date DESC LIMIT 10`,
+    [pattern]
+  );
+  const scoped = prefix ? matches.filter(o => normalizeOrderInput(o.order_id).prefix === prefix) : matches;
+
+  if (scoped.length === 1) return { orderId: scoped[0].order_id, matchedBy: 'pattern', candidates: [] };
+  // Ambiguous (e.g. DS4334 and HP4334 both exist) — let the agent choose
+  // rather than guessing
+  return { orderId: null, matchedBy: null, candidates: scoped.slice(0, 10) };
+}
 
 /**
  * GET /api/orders/:orderId
@@ -40,12 +102,19 @@ router.get('/customer/:email', async (req, res) => {
   }
 });
 
+// GET /api/orders/:orderId?email=  — email is optional and only improves
+// matching for bare numbers; existing callers that omit it still work.
 router.get('/:orderId', async (req, res) => {
-  const cleanId = req.params.orderId.replace(/^#/, '').trim();
-  if (!cleanId) return res.status(400).json({ error: 'Order ID required' });
+  const raw = String(req.params.orderId || '').trim();
+  if (!raw) return res.status(400).json({ error: 'Order ID required' });
 
   try {
     const db = getOrderDb();
+
+    const { orderId: cleanId, matchedBy, candidates } = await resolveOrderId(db, raw, { email: req.query.email });
+    if (!cleanId) {
+      return res.status(404).json({ error: 'Order not found', order_id: raw, candidates });
+    }
 
     const [orders] = await db.query(
       `SELECT
@@ -69,7 +138,9 @@ router.get('/:orderId', async (req, res) => {
       [cleanId, `${cleanId}_%`, cleanId]
     );
 
-    if (!orders.length) return res.status(404).json({ error: 'Order not found', order_id: cleanId });
+    // resolveOrderId already proved this id exists, so an empty result here
+    // would mean the row vanished between the two queries
+    if (!orders.length) return res.status(404).json({ error: 'Order not found', order_id: raw, candidates: [] });
 
     const base = orders.find(o => o.order_id === cleanId) || orders[0];
 
@@ -108,6 +179,11 @@ router.get('/:orderId', async (req, res) => {
 
     res.json({
       order_id:    cleanId,
+      // What the caller asked for, and how we got from one to the other — the
+      // frontend persists resolved_id so later lookups hit the exact branch
+      requested_id: raw,
+      resolved_id:  cleanId,
+      matched_by:   matchedBy,
       customer,
       orders:      orders.map(mapOrder),
       total_items: orders.length,

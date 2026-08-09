@@ -6,6 +6,7 @@ const { syncThreads, sendReply, sendInitialEmail } = require('../services/gmail'
 const { getBrandByName } = require('../config/brands');
 const { requireAdmin } = require('../middleware/authMiddleware');
 const { TICKET_PREFIXES, buildChatBody } = require('../services/emailParser');
+const { normalizeOrderInput } = require('../services/orderId');
 const { buildAckBody, defaultAckBody } = require('../services/automation');
 const {
   getRecallWindowSeconds,
@@ -32,9 +33,23 @@ router.get('/', async (req, res) => {
     if (priority) { where += ' AND t.priority = ?'; params.push(priority); }
     if (tag) { where += ' AND JSON_CONTAINS(t.tags, ?)'; params.push(JSON.stringify(tag)); }
     if (search) {
-      where += ` AND (t.customer_name LIKE ? OR t.customer_email LIKE ? OR t.ticket_id LIKE ? OR t.order_number LIKE ? OR t.subject LIKE ? OR t.tags LIKE ?)`;
       const q = `%${search}%`;
-      params.push(q, q, q, q, q, q);
+      const clauses = [
+        't.customer_name LIKE ?', 't.customer_email LIKE ?', 't.ticket_id LIKE ?',
+        't.order_number LIKE ?', 't.subject LIKE ?', 't.tags LIKE ?',
+        't.order_id_resolved LIKE ?',
+      ];
+      params.push(q, q, q, q, q, q, q);
+
+      // Searching "#4334" should find a ticket stored as "DS4334" — match the
+      // bare digits against both order columns as well
+      const { digits } = normalizeOrderInput(search);
+      if (digits) {
+        clauses.push('t.order_number LIKE ?', 't.order_id_resolved LIKE ?');
+        params.push(`%${digits}%`, `%${digits}%`);
+      }
+
+      where += ` AND (${clauses.join(' OR ')})`;
     }
 
     const [threads] = await db.query(
@@ -177,7 +192,7 @@ const VALID_PRIORITIES = ['normal', 'urgent'];
 
 router.patch('/:id', async (req, res) => {
   try {
-    const { status, priority, tags, snoozed_until } = req.body;
+    const { status, priority, tags, snoozed_until, order_id_resolved } = req.body;
     const updates = [];
     const params  = [];
 
@@ -192,6 +207,14 @@ router.patch('/:id', async (req, res) => {
     }
     if (tags          !== undefined) { updates.push('tags = ?');          params.push(JSON.stringify(tags)); }
     if (snoozed_until !== undefined) { updates.push('snoozed_until = ?'); params.push(snoozed_until || null); }
+    // The canonical order id, either auto-resolved or corrected by an agent.
+    // `order_number` is deliberately not editable — it stays as the customer
+    // typed it, and this column carries what it actually maps to.
+    if (order_id_resolved !== undefined) {
+      const { cleaned } = normalizeOrderInput(order_id_resolved);
+      updates.push('order_id_resolved = ?');
+      params.push(cleaned ? cleaned.slice(0, 100) : null);
+    }
 
     if (!updates.length) return res.status(400).json({ error: 'No fields to update' });
 

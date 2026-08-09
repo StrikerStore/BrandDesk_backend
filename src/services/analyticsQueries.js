@@ -475,7 +475,8 @@ async function getSlaBacklog(f) {
 async function getTicketRows(f) {
   const w = threadWhere(f, { dateCol: 'created_at' });
   const [rows] = await db.query(`
-    SELECT t.ticket_id, t.brand, t.customer_name, t.customer_email, t.order_number,
+    SELECT t.ticket_id, t.brand, t.customer_name, t.customer_email,
+           COALESCE(t.order_id_resolved, t.order_number) AS order_number,
            t.issue_category, t.sub_issue, t.priority, t.status,
            t.resolved_by, u.name AS resolved_by_user,
            t.created_at, t.resolved_at,
