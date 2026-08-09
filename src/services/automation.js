@@ -4,6 +4,46 @@ const { sendReply } = require('./gmail');
 const { getBrands } = require('../config/brands');
 
 /**
+ * Build the acknowledgement body for a ticket from the "Acknowledgement"
+ * template. Shared by the cron auto-ack and the manual-ticket route so the
+ * two can't drift apart.
+ *
+ * Returns null when no template exists — callers decide whether that's fatal.
+ */
+async function buildAckBody({ customerName, brandName, orderNumber, ticketId }) {
+  const [tplRows] = await db.query(
+    `SELECT * FROM templates WHERE title LIKE '%Acknowledgement%' OR title LIKE '%acknowledgement%' LIMIT 1`
+  );
+  if (!tplRows.length) return null;
+
+  const firstName = customerName?.split(' ')[0] || 'there';
+  return tplRows[0].body
+    .replace(/\{\{customer_name\}\}/g, firstName)
+    .replace(/\{\{brand\}\}/g, brandName)
+    .replace(/\{\{order_id\}\}/g,  orderNumber || '[order ID]')
+    .replace(/\{\{ticket_id\}\}/g, ticketId    || '[ticket ID]');
+}
+
+/**
+ * Fallback acknowledgement for when no template row exists. The manual ticket
+ * route must still send something — it has already told the agent the ticket
+ * was raised.
+ */
+function defaultAckBody({ customerName, brandName, ticketId }) {
+  const firstName = customerName?.split(' ')[0] || 'there';
+  return [
+    `Hi ${firstName},`,
+    '',
+    `Thanks for reaching out to ${brandName}. We've received your request and our team is looking into it.`,
+    ticketId ? `Your ticket reference is ${ticketId}.` : '',
+    '',
+    "We'll get back to you within 24-48 hours.",
+    '',
+    `Team ${brandName}`,
+  ].filter(Boolean).join('\n');
+}
+
+/**
  * Auto-acknowledgement
  * Runs every minute via cron.
  * Finds new threads (no outbound messages yet) older than delay_minutes
@@ -40,15 +80,6 @@ async function runAutoAck() {
 
   if (!threads.length) return;
 
-  // Get the acknowledgement template
-  const [tplRows] = await db.query(
-    `SELECT * FROM templates WHERE title LIKE '%Acknowledgement%' OR title LIKE '%acknowledgement%' LIMIT 1`
-  );
-  if (!tplRows.length) {
-    console.log('⚠ Auto-ack: No acknowledgement template found');
-    return;
-  }
-
   const brands = getBrands();
 
   for (const thread of threads) {
@@ -56,13 +87,16 @@ async function runAutoAck() {
       const brand = brands.find(b => b.name === thread.brand);
       if (!brand) continue;
 
-      // Resolve template variables
-      const firstName = thread.customer_name?.split(' ')[0] || 'there';
-      const body = tplRows[0].body
-        .replace(/\{\{customer_name\}\}/g, firstName)
-        .replace(/\{\{brand\}\}/g, brand.name)
-        .replace(/\{\{order_id\}\}/g,  thread.order_number || '[order ID]')
-        .replace(/\{\{ticket_id\}\}/g, thread.ticket_id    || '[ticket ID]');
+      const body = await buildAckBody({
+        customerName: thread.customer_name,
+        brandName:    brand.name,
+        orderNumber:  thread.order_number,
+        ticketId:     thread.ticket_id,
+      });
+      if (!body) {
+        console.log('⚠ Auto-ack: No acknowledgement template found');
+        return;
+      }
 
       await sendReply(thread.gmail_thread_id, body, brand, false);
 
@@ -148,4 +182,4 @@ async function runAutoResolve() {
   console.log(`🤖 Auto-resolve: resolved ${threads.length} in-progress thread(s)`);
 }
 
-module.exports = { runAutoAck, runAutoResolve };
+module.exports = { runAutoAck, runAutoResolve, buildAckBody, defaultAckBody };

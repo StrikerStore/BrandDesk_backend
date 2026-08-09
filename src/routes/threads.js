@@ -5,7 +5,8 @@ const db = require('../config/db');
 const { syncThreads, sendReply, sendInitialEmail } = require('../services/gmail');
 const { getBrandByName } = require('../config/brands');
 const { requireAdmin } = require('../middleware/authMiddleware');
-const { TICKET_PREFIXES } = require('../services/emailParser');
+const { TICKET_PREFIXES, buildChatBody } = require('../services/emailParser');
+const { buildAckBody, defaultAckBody } = require('../services/automation');
 const {
   getRecallWindowSeconds,
   queueReply,
@@ -90,7 +91,9 @@ router.get('/:id', async (req, res) => {
     const [threads] = await db.query('SELECT * FROM threads WHERE id = ?', [req.params.id]);
     if (!threads.length) return res.status(404).json({ error: 'Thread not found' });
     const [messages] = await db.query(
-      'SELECT * FROM messages WHERE thread_id = ? ORDER BY sent_at ASC', [req.params.id]
+      // id tie-breaks rows written in the same second (e.g. a manual ticket's
+      // details card and its acknowledgement)
+      'SELECT * FROM messages WHERE thread_id = ? ORDER BY sent_at ASC, id ASC', [req.params.id]
     );
     // Attach image attachments to each message
     const messageIds = messages.map(m => m.id);
@@ -237,16 +240,22 @@ router.post('/:id/resolve', async (req, res) => {
 router.post('/manual', async (req, res) => {
   try {
     const {
-      customer_email, customer_name, brand, subject,
+      customer_email, customer_name, customer_phone, brand, subject,
       issue_category, sub_issue, order_number, description, priority,
     } = req.body;
 
+    // Mirrors the required fields on the customer-facing Shopify form
+    if (!order_number?.trim())   return res.status(400).json({ error: 'Order number is required' });
+    if (!customer_name?.trim())  return res.status(400).json({ error: 'Customer name is required' });
     if (!customer_email?.trim() || !customer_email.includes('@')) {
       return res.status(400).json({ error: 'Valid customer email is required' });
     }
-    if (!subject?.trim())      return res.status(400).json({ error: 'Subject is required' });
-    if (!brand?.trim())        return res.status(400).json({ error: 'Brand is required' });
-    if (!description?.trim())  return res.status(400).json({ error: 'Initial message is required' });
+    if (!customer_phone?.trim()) return res.status(400).json({ error: 'Contact number is required' });
+    if (!brand?.trim())          return res.status(400).json({ error: 'Brand is required' });
+    if (!issue_category?.trim()) return res.status(400).json({ error: 'Issue category is required' });
+    if (!sub_issue?.trim())      return res.status(400).json({ error: 'Sub issue is required' });
+    if (!subject?.trim())        return res.status(400).json({ error: 'Subject is required' });
+    if (!description?.trim())    return res.status(400).json({ error: 'Description is required' });
 
     const brandObj = getBrandByName(brand);
     console.log('[manual-ticket] brandObj:', JSON.stringify(brandObj));
@@ -266,7 +275,31 @@ router.post('/manual', async (req, res) => {
     const ticketId = `${prefix}-${dateStr}-${randNum}`;
 
     const safeSubject = subject.trim().slice(0, 500);
-    const safeBody    = description.trim();
+    const safeName    = customer_name.trim().slice(0, 255);
+    const safePhone   = customer_phone.trim().slice(0, 50);
+    const safeOrder   = order_number.trim().slice(0, 100);
+
+    // The description is what the CUSTOMER reported, so it becomes an inbound
+    // structured card (left side of the thread) — identical in shape to a
+    // Shopify-form ticket, which is what buildChatBody already produces.
+    const detailsBody = buildChatBody({
+      isShopifyForm: true,
+      ticketId,
+      orderNumber:   safeOrder,
+      issueCategory: issue_category.trim(),
+      subIssue:      sub_issue.trim(),
+      customerPhone: safePhone,
+      messageBody:   description.trim(),
+    });
+
+    // What actually gets emailed is an acknowledgement, not the description
+    const safeBody = (await buildAckBody({
+      customerName: safeName,
+      brandName:    brandObj.name,
+      orderNumber:  safeOrder,
+      ticketId,
+    })) || defaultAckBody({ customerName: safeName, brandName: brandObj.name, ticketId });
+
     const win = await getRecallWindowSeconds();
 
     console.log('[manual-ticket] ticketId:', ticketId, '| to:', safeEmail, '| subject:', safeSubject, '| window:', win);
@@ -274,9 +307,9 @@ router.post('/manual', async (req, res) => {
     const insertThread = (gmailThreadId) => db.query(
       `INSERT INTO threads
          (gmail_thread_id, subject, brand, brand_email, status, priority,
-          customer_email, customer_name, issue_category, sub_issue, order_number,
+          customer_email, customer_name, customer_phone, issue_category, sub_issue, order_number,
           ticket_id, is_manual, auto_ack_sent, is_unread)
-       VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, 1, 1, 0)`,
+       VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 0)`,
       [
         gmailThreadId,
         safeSubject,
@@ -284,12 +317,20 @@ router.post('/manual', async (req, res) => {
         brandObj.email,
         safePriority,
         safeEmail,
-        customer_name?.trim().slice(0, 255)  || null,
-        issue_category?.trim().slice(0, 255) || null,
-        sub_issue?.trim().slice(0, 255)      || null,
-        order_number?.trim().slice(0, 100)   || null,
+        safeName,
+        safePhone,
+        issue_category.trim().slice(0, 255),
+        sub_issue.trim().slice(0, 255),
+        safeOrder,
         ticketId,
       ]
+    );
+
+    // The customer's reported details — always the first message in the thread
+    const insertDetails = (threadId) => db.query(
+      `INSERT INTO messages (thread_id, direction, from_email, from_name, body, is_note, sent_at)
+       VALUES (?, 'inbound', ?, ?, ?, 0, NOW())`,
+      [threadId, safeEmail, safeName, detailsBody]
     );
 
     // Recall disabled — original behaviour, send first and store the real IDs.
@@ -301,6 +342,9 @@ router.post('/manual', async (req, res) => {
       console.log('[manual-ticket] sendInitialEmail OK — gmailThreadId:', gmailThreadId, '| gmailMessageId:', gmailMessageId);
 
       const [result] = await insertThread(gmailThreadId);
+      // Details first so it sorts ahead of the acknowledgement (same NOW(),
+      // tie-broken by id — see the ORDER BY in GET /:id)
+      await insertDetails(result.insertId);
       await db.query(
         `INSERT INTO messages (thread_id, gmail_message_id, direction, from_email, from_name, body, is_note, sent_at)
          VALUES (?, ?, 'outbound', ?, ?, ?, 0, NOW())`,
@@ -316,6 +360,9 @@ router.post('/manual', async (req, res) => {
     const placeholderId = `pending_${crypto.randomBytes(12).toString('hex')}`;
     const [result] = await insertThread(placeholderId);
     const threadId = result.insertId;
+
+    // Shows immediately, even while the acknowledgement sits in the recall window
+    await insertDetails(threadId);
 
     const queued = await queueInitialEmail({
       threadId,
