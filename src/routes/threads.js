@@ -216,10 +216,13 @@ router.post('/:id/resolve', async (req, res) => {
         status = 'resolved',
         status_changed_at = NOW(),
         resolved_by = ?,
+        resolved_by_user_id = ?,
         resolution_note = ?,
         resolved_at = NOW()
        WHERE id = ?`,
-      [resolved_by.trim(), resolution_note.trim(), req.params.id]
+      // resolved_by stays the free-text name shown in the thread; the id is
+      // what analytics groups on
+      [resolved_by.trim(), req.user?.id || null, resolution_note.trim(), req.params.id]
     );
 
     // Add a system message to the thread timeline
@@ -425,7 +428,7 @@ router.post('/:gmailId/reply', upload.array('attachments', 10), async (req, res)
 
     // Internal notes are never emailed, so there is nothing to recall.
     if (isNote) {
-      const result = await sendReply(req.params.gmailId, body, brand, true, attachments);
+      const result = await sendReply(req.params.gmailId, body, brand, true, attachments, req.user?.id || null);
       return res.json(result);
     }
 

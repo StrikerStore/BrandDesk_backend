@@ -50,8 +50,8 @@ router.post('/', async (req, res) => {
     const [result] = await db.query(
       `INSERT INTO thread_actions
         (thread_id, action_type, pickup_jersey, exchange_jersey, alternate_jersey,
-         current_jersey, new_jersey, new_address)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         current_jersey, new_jersey, new_address, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         req.params.threadId,
         action_type,
@@ -61,6 +61,7 @@ router.post('/', async (req, res) => {
         current_jersey?.trim() || null,
         new_jersey?.trim() || null,
         new_address?.trim() || null,
+        req.user?.id || null,
       ]
     );
     const [rows] = await db.query('SELECT * FROM thread_actions WHERE id = ?', [result.insertId]);
@@ -107,8 +108,8 @@ router.patch('/:actionId', async (req, res) => {
 router.post('/:actionId/close', async (req, res) => {
   try {
     await db.query(
-      'UPDATE thread_actions SET is_closed = 1, closed_at = NOW() WHERE id = ? AND thread_id = ?',
-      [req.params.actionId, req.params.threadId]
+      'UPDATE thread_actions SET is_closed = 1, closed_at = NOW(), closed_by = ? WHERE id = ? AND thread_id = ?',
+      [req.user?.id || null, req.params.actionId, req.params.threadId]
     );
     const [rows] = await db.query('SELECT * FROM thread_actions WHERE id = ?', [req.params.actionId]);
     if (!rows.length) return res.status(404).json({ error: 'Action not found' });
@@ -202,8 +203,8 @@ globalRouter.patch('/:actionId', async (req, res) => {
 globalRouter.post('/:actionId/close', async (req, res) => {
   try {
     await db.query(
-      'UPDATE thread_actions SET is_closed = 1, closed_at = NOW() WHERE id = ?',
-      [req.params.actionId]
+      'UPDATE thread_actions SET is_closed = 1, closed_at = NOW(), closed_by = ? WHERE id = ?',
+      [req.user?.id || null, req.params.actionId]
     );
     const [rows] = await db.query(
       `SELECT ta.*, t.customer_name, t.customer_email, t.ticket_id, t.order_number,

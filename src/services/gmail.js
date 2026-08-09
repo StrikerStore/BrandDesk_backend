@@ -380,15 +380,17 @@ async function processThread(gmail, gmailThreadId, brand) {
   }
 }
 
-async function sendReply(gmailThreadId, body, brand, isNote = false, attachments = []) {
+// userId attributes the message to an agent for analytics. Leave null for
+// system sends (auto-ack, auto-resolve) — they must not be credited to anyone.
+async function sendReply(gmailThreadId, body, brand, isNote = false, attachments = [], userId = null) {
   if (isNote) {
     // Internal notes are stored only, not sent
     const [thread] = await db.query('SELECT id FROM threads WHERE gmail_thread_id=?', [gmailThreadId]);
     if (!thread.length) throw new Error('Thread not found');
     await db.query(
-      `INSERT INTO messages (thread_id, direction, from_email, body, is_note, sent_at)
-       VALUES (?, 'outbound', ?, ?, 1, NOW())`,
-      [thread[0].id, brand.email, body]
+      `INSERT INTO messages (thread_id, direction, from_email, body, is_note, user_id, sent_at)
+       VALUES (?, 'outbound', ?, ?, 1, ?, NOW())`,
+      [thread[0].id, brand.email, body, userId]
     );
     return { success: true, note: true };
   }
@@ -467,9 +469,9 @@ async function sendReply(gmailThreadId, body, brand, isNote = false, attachments
   const [threadRow] = await db.query('SELECT id, status FROM threads WHERE gmail_thread_id=?', [gmailThreadId]);
   if (threadRow.length) {
     await db.query(
-      `INSERT INTO messages (thread_id, gmail_message_id, direction, from_email, body, sent_at)
-       VALUES (?, ?, 'outbound', ?, ?, NOW())`,
-      [threadRow[0].id, sendRes.data.id, brand.email, body]
+      `INSERT INTO messages (thread_id, gmail_message_id, direction, from_email, body, user_id, sent_at)
+       VALUES (?, ?, 'outbound', ?, ?, ?, NOW())`,
+      [threadRow[0].id, sendRes.data.id, brand.email, body, userId]
     );
 
     // Auto-advance status: open → in_progress on first reply

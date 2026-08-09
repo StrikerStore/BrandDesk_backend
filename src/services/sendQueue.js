@@ -65,7 +65,7 @@ async function queueReply({ threadId, gmailThreadId, body, brand, attachments = 
   // Kill switch (window = 0) and oversized attachments take the original path,
   // byte for byte.
   if (win === 0 || totalBytes > MAX_QUEUEABLE_ATTACHMENT_BYTES) {
-    const result = await sendReply(gmailThreadId, body, brand, false, attachments);
+    const result = await sendReply(gmailThreadId, body, brand, false, attachments, userId || null);
     return { pending: false, ...result };
   }
 
@@ -176,7 +176,7 @@ async function flushOne(id) {
         return;
       }
 
-      await sendReply(gmailThreadId, row.body, brand, false, attachments);
+      await sendReply(gmailThreadId, row.body, brand, false, attachments, row.created_by || null);
     } else {
       const { gmailThreadId, gmailMessageId } = await sendInitialEmail(
         row.to_email, row.subject, row.body, brand, row.ticket_id

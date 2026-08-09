@@ -122,25 +122,32 @@ function calculateSLADeadline(createdAt) {
 }
 
 /**
- * Calculate how many business minutes have elapsed since ticket was created.
- * Used for "time elapsed" display.
+ * Business minutes elapsed between two instants.
+ *
+ * @param {Date|string} utcStart
+ * @param {Date|string} [utcEnd] - defaults to now. Pass an explicit end to
+ *   measure a historical span (e.g. created → first response) rather than
+ *   "time elapsed so far".
  */
-function businessMinutesElapsed(utcStart) {
+function businessMinutesElapsed(utcStart, utcEnd) {
   const start = new Date(utcStart);
-  const now   = new Date();
+  const end   = utcEnd ? new Date(utcEnd) : new Date();
   let elapsed = 0;
   let current = new Date(start);
 
-  // Cap at 30 days to avoid infinite loops
+  // Cap at 30 days to avoid runaway loops on stale rows
   const cap = new Date(start.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-  while (current < now && current < cap) {
+  while (current < end && current < cap) {
     if (isInBusinessHours(current)) {
       const ist = toIST(current);
       const hourIST = ist.getHours() + ist.getMinutes() / 60;
       const minsUntilEOD = (BH_END - hourIST) * 60;
-      const minsUntilNow = (now - current) / 60000;
-      const chunk = Math.min(minsUntilEOD, minsUntilNow, 1);
+      const minsUntilEnd = (end - current) / 60000;
+      // Consume the rest of the business day (or the remainder) in one step —
+      // stepping a minute at a time gave the same answer for ~600x the work.
+      const chunk = Math.min(minsUntilEOD, minsUntilEnd);
+      if (chunk <= 0) break;
       elapsed += chunk;
       current = new Date(current.getTime() + chunk * 60000);
     } else {

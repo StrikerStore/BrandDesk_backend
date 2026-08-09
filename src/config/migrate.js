@@ -121,8 +121,13 @@ async function migrate() {
   await addColumn(conn, 'threads', 'auto_ack_sent', 'TINYINT(1) DEFAULT 0');
   // v9 column — manual tickets raised by agents
   await addColumn(conn, 'threads', 'is_manual', 'TINYINT(1) DEFAULT 0');
+  // v14 column — agent attribution for analytics. `resolved_by` stays as the
+  // free-text name the agent types; this is the joinable id behind it.
+  await addColumn(conn, 'threads', 'resolved_by_user_id', 'INT NULL');
   // v2 index
   await addIndex(conn, 'threads', 'idx_ticket_id', 'INDEX idx_ticket_id (ticket_id)');
+  // v14 index
+  await addIndex(conn, 'threads', 'idx_resolved_by_user', 'INDEX idx_resolved_by_user (resolved_by_user_id)');
   // v4 backfill
   await conn.query(`UPDATE threads SET status_changed_at = created_at WHERE status_changed_at IS NULL`);
 
@@ -145,6 +150,10 @@ async function migrate() {
       INDEX idx_gmail_message_id (gmail_message_id)
     )
   `);
+  // v14 — which agent sent this. NULL for inbound mail and system sends
+  // (auto-ack, auto-resolve notes, manual-ticket acknowledgements).
+  await addColumn(conn, 'messages', 'user_id', 'INT NULL');
+  await addIndex(conn, 'messages', 'idx_msg_user', 'INDEX idx_msg_user (user_id)');
 
   // ── Templates ──────────────────────────────────────────────
   await conn.query(`
@@ -270,6 +279,22 @@ async function migrate() {
   await addColumn(conn, 'thread_actions', 'new_address', 'VARCHAR(500)');
   await addColumn(conn, 'thread_actions', 'size_change_done', 'TINYINT(1) DEFAULT 0');
   await addColumn(conn, 'thread_actions', 'address_change_done', 'TINYINT(1) DEFAULT 0');
+  // v14 — agent attribution
+  await addColumn(conn, 'thread_actions', 'created_by', 'INT NULL');
+  await addColumn(conn, 'thread_actions', 'closed_by',  'INT NULL');
+  await addIndex(conn, 'thread_actions', 'idx_act_created_by', 'INDEX idx_act_created_by (created_by)');
+  await addIndex(conn, 'thread_actions', 'idx_act_closed_by',  'INDEX idx_act_closed_by (closed_by)');
+
+  // v14 backfill — best-effort match of the historic free-text resolver name to
+  // a user. Typos and the literal 'system' stay NULL and show as Unattributed.
+  const [bf] = await conn.query(`
+    UPDATE threads t
+      JOIN users u ON LOWER(TRIM(u.name)) = LOWER(TRIM(t.resolved_by))
+    SET t.resolved_by_user_id = u.id
+    WHERE t.resolved_by_user_id IS NULL
+      AND t.resolved_by IS NOT NULL AND t.resolved_by != ''
+  `);
+  if (bf.affectedRows) console.log(`  ✅ resolved_by_user_id backfilled for ${bf.affectedRows} thread(s)`);
 
   // ── Pending Sends (v13) — undo-send / recall window ──────
   // Deliberately NOT stored in `messages`: POST /api/threads/resync wipes that
