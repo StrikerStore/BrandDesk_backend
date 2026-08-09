@@ -22,7 +22,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 
 // GET /api/threads
 router.get('/', async (req, res) => {
   try {
-    const { brand, status, priority, tag, search, page = 1, limit = 50 } = req.query;
+    const { brand, status, priority, tag, search, assignee, page = 1, limit = 50 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     let where = '(t.snoozed_until IS NULL OR t.snoozed_until <= NOW())';
@@ -30,6 +30,11 @@ router.get('/', async (req, res) => {
 
     if (brand && brand !== 'all') { where += ' AND t.brand = ?'; params.push(brand); }
     if (status && status !== 'all') { where += ' AND t.status = ?'; params.push(status); }
+    // `me` and `unassigned` are the two that matter day to day; a raw id is
+    // accepted so a lead can look at one agent's queue.
+    if (assignee === 'me')              { where += ' AND t.assignee_id = ?'; params.push(req.user?.id || 0); }
+    else if (assignee === 'unassigned') { where += ' AND t.assignee_id IS NULL'; }
+    else if (assignee)                  { where += ' AND t.assignee_id = ?'; params.push(parseInt(assignee) || 0); }
     if (priority) { where += ' AND t.priority = ?'; params.push(priority); }
     if (tag) { where += ' AND JSON_CONTAINS(t.tags, ?)'; params.push(JSON.stringify(tag)); }
     if (search) {
@@ -54,9 +59,12 @@ router.get('/', async (req, res) => {
 
     const [threads] = await db.query(
       `SELECT t.*,
+        au.name  AS assignee_name,
+        au.email AS assignee_email,
         (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) as message_count,
         (SELECT sent_at FROM messages m WHERE m.thread_id = t.id ORDER BY sent_at DESC LIMIT 1) as last_message_at
        FROM threads t
+       LEFT JOIN users au ON au.id = t.assignee_id
        WHERE ${where}
        ORDER BY
          CASE t.priority WHEN 'urgent' THEN 1 ELSE 2 END ASC,
@@ -103,7 +111,10 @@ router.get('/stats/overview', async (req, res) => {
 // GET /api/threads/:id
 router.get('/:id', async (req, res) => {
   try {
-    const [threads] = await db.query('SELECT * FROM threads WHERE id = ?', [req.params.id]);
+    const [threads] = await db.query(
+      `SELECT t.*, au.name AS assignee_name, au.email AS assignee_email
+         FROM threads t LEFT JOIN users au ON au.id = t.assignee_id
+        WHERE t.id = ?`, [req.params.id]);
     if (!threads.length) return res.status(404).json({ error: 'Thread not found' });
     const [messages] = await db.query(
       // id tie-breaks rows written in the same second (e.g. a manual ticket's
@@ -135,7 +146,20 @@ router.get('/:id', async (req, res) => {
     const pending = await listPendingForThread(req.params.id);
 
     await db.query('UPDATE threads SET is_unread = 0 WHERE id = ?', [req.params.id]);
-    res.json({ thread: threads[0], messages: messagesWithAttachments, pending });
+
+    // The list endpoint attaches SLA but this one never did, so the thread
+    // header had no way to show whether the ticket it's displaying is overdue.
+    const { getSLAStatus } = require('../services/sla');
+    const t = threads[0];
+    const sla = t.status === 'resolved' ? null : getSLAStatus(t.created_at, t.status);
+    const thread = {
+      ...t,
+      sla_status: sla?.status || null,
+      sla_label:  sla?.label  || null,
+      sla_pct:    sla?.pct    || 0,
+    };
+
+    res.json({ thread, messages: messagesWithAttachments, pending });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch thread' });
   }
@@ -192,9 +216,21 @@ const VALID_PRIORITIES = ['normal', 'urgent'];
 
 router.patch('/:id', async (req, res) => {
   try {
-    const { status, priority, tags, snoozed_until, order_id_resolved } = req.body;
+    const { status, priority, tags, snoozed_until, order_id_resolved, assignee_id } = req.body;
     const updates = [];
     const params  = [];
+
+    // null clears the assignment; any other value must be a real active user.
+    if (assignee_id !== undefined) {
+      if (assignee_id === null) {
+        updates.push('assignee_id = NULL');
+      } else {
+        const [u] = await db.query('SELECT id FROM users WHERE id = ? AND is_active = 1', [assignee_id]);
+        if (!u.length) return res.status(400).json({ error: 'Unknown or inactive user' });
+        updates.push('assignee_id = ?');
+        params.push(assignee_id);
+      }
+    }
 
     if (status !== undefined) {
       if (!VALID_STATUSES.includes(status)) return res.status(400).json({ error: 'Invalid status value' });
@@ -220,7 +256,10 @@ router.patch('/:id', async (req, res) => {
 
     params.push(req.params.id);
     await db.query(`UPDATE threads SET ${updates.join(', ')} WHERE id = ?`, params);
-    const [updated] = await db.query('SELECT * FROM threads WHERE id = ?', [req.params.id]);
+    const [updated] = await db.query(
+      `SELECT t.*, au.name AS assignee_name, au.email AS assignee_email
+         FROM threads t LEFT JOIN users au ON au.id = t.assignee_id
+        WHERE t.id = ?`, [req.params.id]);
     res.json(updated[0]);
   } catch (err) {
     res.status(500).json({ error: 'Failed to update thread' });
@@ -255,7 +294,10 @@ router.post('/:id/resolve', async (req, res) => {
       [req.params.id, `✅ Resolved by ${resolved_by.trim()}\n\n${resolution_note.trim()}`]
     );
 
-    const [updated] = await db.query('SELECT * FROM threads WHERE id = ?', [req.params.id]);
+    const [updated] = await db.query(
+      `SELECT t.*, au.name AS assignee_name, au.email AS assignee_email
+         FROM threads t LEFT JOIN users au ON au.id = t.assignee_id
+        WHERE t.id = ?`, [req.params.id]);
     res.json(updated[0]);
   } catch (err) {
     res.status(500).json({ error: 'Failed to resolve thread' });

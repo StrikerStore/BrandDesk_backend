@@ -127,12 +127,17 @@ async function migrate() {
   // v15 — canonical order id from the external OMS. `order_number` keeps the
   // customer's literal text; this holds what it actually resolved to.
   await addColumn(conn, 'threads', 'order_id_resolved', 'VARCHAR(100) NULL');
+  // v16 — ticket ownership. Without it two agents could independently open the
+  // same unread ticket and both reply to the customer.
+  await addColumn(conn, 'threads', 'assignee_id', 'INT NULL');
   // v2 index
   await addIndex(conn, 'threads', 'idx_ticket_id', 'INDEX idx_ticket_id (ticket_id)');
   // v14 index
   await addIndex(conn, 'threads', 'idx_resolved_by_user', 'INDEX idx_resolved_by_user (resolved_by_user_id)');
   // v15 index
   await addIndex(conn, 'threads', 'idx_order_id_resolved', 'INDEX idx_order_id_resolved (order_id_resolved)');
+  // v16 index
+  await addIndex(conn, 'threads', 'idx_assignee', 'INDEX idx_assignee (assignee_id)');
   // v4 backfill
   await conn.query(`UPDATE threads SET status_changed_at = created_at WHERE status_changed_at IS NULL`);
 
