@@ -1,5 +1,38 @@
 const express = require('express');
 const db = require('../config/db');
+const {
+  VALID_TYPES, pickUpdates,
+  createAction, applyActionUpdate, closeAction,
+} = require('../services/actionProgress');
+
+// Every write below goes through services/actionProgress, which logs the
+// change to action_events and moves the ticket to in progress. The allowed
+// field list used to be duplicated verbatim in both PATCH handlers; it now
+// lives in that service.
+
+const THREAD_JOIN = `
+  SELECT ta.*, t.customer_name, t.customer_email, t.ticket_id, t.order_number,
+         t.brand, t.status AS thread_status, t.subject AS thread_subject
+    FROM thread_actions ta JOIN threads t ON t.id = ta.thread_id
+   WHERE ta.id = ?`;
+
+function validateNewAction(body) {
+  const { action_type, pickup_jersey, exchange_jersey, alternate_jersey,
+          current_jersey, new_jersey, new_address } = body;
+
+  if (!VALID_TYPES.includes(action_type)) return 'Invalid action_type';
+  // pickup_jersey is required for the pickup-based types and for refund
+  // (the jersey being refunded)
+  if (['exchange', 'return', 'alternate_product', 'refund'].includes(action_type) && !pickup_jersey?.trim()) {
+    return 'pickup_jersey is required';
+  }
+  if (action_type === 'exchange' && !exchange_jersey?.trim())          return 'exchange_jersey is required for exchange';
+  if (action_type === 'alternate_product' && !alternate_jersey?.trim()) return 'alternate_jersey is required for alternate product';
+  if (action_type === 'change_size' && !current_jersey?.trim())         return 'current_jersey is required for change size';
+  if (action_type === 'change_size' && !new_jersey?.trim())             return 'new_jersey is required for change size';
+  if (action_type === 'change_address' && !new_address?.trim())         return 'new_address is required for change address';
+  return null;
+}
 
 // ── Per-thread router (mounted at /api/threads/:threadId/actions) ──────────
 const router = express.Router({ mergeParams: true });
@@ -20,52 +53,12 @@ router.get('/', async (req, res) => {
 
 // POST /api/threads/:threadId/actions
 router.post('/', async (req, res) => {
-  const { action_type, pickup_jersey, exchange_jersey, alternate_jersey,
-          current_jersey, new_jersey, new_address } = req.body;
-
-  if (!['exchange', 'return', 'alternate_product', 'refund', 'change_size', 'change_address'].includes(action_type)) {
-    return res.status(400).json({ error: 'Invalid action_type' });
-  }
-  // pickup_jersey required for the pickup-based types and for refund (the jersey being refunded)
-  if (['exchange', 'return', 'alternate_product', 'refund'].includes(action_type) && !pickup_jersey?.trim()) {
-    return res.status(400).json({ error: 'pickup_jersey is required' });
-  }
-  if (action_type === 'exchange' && !exchange_jersey?.trim()) {
-    return res.status(400).json({ error: 'exchange_jersey is required for exchange' });
-  }
-  if (action_type === 'alternate_product' && !alternate_jersey?.trim()) {
-    return res.status(400).json({ error: 'alternate_jersey is required for alternate product' });
-  }
-  if (action_type === 'change_size' && !current_jersey?.trim()) {
-    return res.status(400).json({ error: 'current_jersey is required for change size' });
-  }
-  if (action_type === 'change_size' && !new_jersey?.trim()) {
-    return res.status(400).json({ error: 'new_jersey is required for change size' });
-  }
-  if (action_type === 'change_address' && !new_address?.trim()) {
-    return res.status(400).json({ error: 'new_address is required for change address' });
-  }
+  const invalid = validateNewAction(req.body);
+  if (invalid) return res.status(400).json({ error: invalid });
 
   try {
-    const [result] = await db.query(
-      `INSERT INTO thread_actions
-        (thread_id, action_type, pickup_jersey, exchange_jersey, alternate_jersey,
-         current_jersey, new_jersey, new_address, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        req.params.threadId,
-        action_type,
-        pickup_jersey?.trim() || null,
-        exchange_jersey?.trim() || null,
-        alternate_jersey?.trim() || null,
-        current_jersey?.trim() || null,
-        new_jersey?.trim() || null,
-        new_address?.trim() || null,
-        req.user?.id || null,
-      ]
-    );
-    const [rows] = await db.query('SELECT * FROM thread_actions WHERE id = ?', [result.insertId]);
-    res.status(201).json({ action: rows[0] });
+    const { action, thread } = await createAction(req.params.threadId, req.body, req.user?.id);
+    res.status(201).json({ action, thread_status: thread?.status, reopened: !!thread?.reopened });
   } catch (err) {
     console.error('Create action error:', err);
     res.status(500).json({ error: 'Failed to create action' });
@@ -74,30 +67,19 @@ router.post('/', async (req, res) => {
 
 // PATCH /api/threads/:threadId/actions/:actionId
 router.patch('/:actionId', async (req, res) => {
-  const ALLOWED = [
-    'pickup_jersey', 'exchange_jersey', 'alternate_jersey',
-    'current_jersey', 'new_jersey', 'new_address',
-    'exchange_order_id', 'exchange_pickup_done', 'exchange_packed',
-    'return_created', 'return_received', 'refund_done', 'refund_id', 'refund_time',
-    'alt_order_created', 'original_order_cancelled',
-    'size_change_done', 'address_change_done',
-  ];
-  const updates = {};
-  for (const key of ALLOWED) {
-    if (key in req.body) updates[key] = req.body[key];
-  }
+  const updates = pickUpdates(req.body);
   if (!Object.keys(updates).length) {
     return res.status(400).json({ error: 'No valid fields to update' });
   }
   try {
-    const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-    await db.query(
-      `UPDATE thread_actions SET ${setClauses} WHERE id = ? AND thread_id = ?`,
-      [...Object.values(updates), req.params.actionId, req.params.threadId]
-    );
-    const [rows] = await db.query('SELECT * FROM thread_actions WHERE id = ?', [req.params.actionId]);
-    if (!rows.length) return res.status(404).json({ error: 'Action not found' });
-    res.json({ action: rows[0] });
+    const result = await applyActionUpdate({
+      actionId: req.params.actionId,
+      threadId: req.params.threadId,
+      updates,
+      userId: req.user?.id,
+    });
+    if (result.notFound) return res.status(404).json({ error: 'Action not found' });
+    res.json({ action: result.action, thread_status: result.thread?.status, reopened: !!result.thread?.reopened });
   } catch (err) {
     console.error('Update action error:', err);
     res.status(500).json({ error: 'Failed to update action' });
@@ -107,13 +89,13 @@ router.patch('/:actionId', async (req, res) => {
 // POST /api/threads/:threadId/actions/:actionId/close
 router.post('/:actionId/close', async (req, res) => {
   try {
-    await db.query(
-      'UPDATE thread_actions SET is_closed = 1, closed_at = NOW(), closed_by = ? WHERE id = ? AND thread_id = ?',
-      [req.user?.id || null, req.params.actionId, req.params.threadId]
-    );
-    const [rows] = await db.query('SELECT * FROM thread_actions WHERE id = ?', [req.params.actionId]);
-    if (!rows.length) return res.status(404).json({ error: 'Action not found' });
-    res.json({ action: rows[0] });
+    const result = await closeAction({
+      actionId: req.params.actionId,
+      threadId: req.params.threadId,
+      userId: req.user?.id,
+    });
+    if (result.notFound) return res.status(404).json({ error: 'Action not found' });
+    res.json({ action: result.action, thread_status: result.thread?.status, reopened: !!result.thread?.reopened });
   } catch (err) {
     console.error('Close action error:', err);
     res.status(500).json({ error: 'Failed to close action' });
@@ -133,7 +115,7 @@ globalRouter.get('/', async (req, res) => {
 
     if (status === 'open')   { where += ' AND ta.is_closed = 0'; }
     if (status === 'closed') { where += ' AND ta.is_closed = 1'; }
-    if (type && ['exchange', 'return', 'alternate_product', 'refund', 'change_size', 'change_address'].includes(type)) {
+    if (type && VALID_TYPES.includes(type)) {
       where += ' AND ta.action_type = ?';
       params.push(type);
     }
@@ -163,36 +145,19 @@ globalRouter.get('/', async (req, res) => {
 
 // PATCH /api/actions/:actionId  — update status fields (from consolidated view)
 globalRouter.patch('/:actionId', async (req, res) => {
-  const ALLOWED = [
-    'pickup_jersey', 'exchange_jersey', 'alternate_jersey',
-    'current_jersey', 'new_jersey', 'new_address',
-    'exchange_order_id', 'exchange_pickup_done', 'exchange_packed',
-    'return_created', 'return_received', 'refund_done', 'refund_id', 'refund_time',
-    'alt_order_created', 'original_order_cancelled',
-    'size_change_done', 'address_change_done',
-  ];
-  const updates = {};
-  for (const key of ALLOWED) {
-    if (key in req.body) updates[key] = req.body[key];
-  }
+  const updates = pickUpdates(req.body);
   if (!Object.keys(updates).length) {
     return res.status(400).json({ error: 'No valid fields to update' });
   }
   try {
-    const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-    await db.query(
-      `UPDATE thread_actions SET ${setClauses} WHERE id = ?`,
-      [...Object.values(updates), req.params.actionId]
-    );
-    const [rows] = await db.query(
-      `SELECT ta.*, t.customer_name, t.customer_email, t.ticket_id, t.order_number,
-              t.brand, t.status AS thread_status, t.subject AS thread_subject
-       FROM thread_actions ta JOIN threads t ON t.id = ta.thread_id
-       WHERE ta.id = ?`,
-      [req.params.actionId]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Action not found' });
-    res.json({ action: rows[0] });
+    const result = await applyActionUpdate({
+      actionId: req.params.actionId,
+      updates,
+      userId: req.user?.id,
+    });
+    if (result.notFound) return res.status(404).json({ error: 'Action not found' });
+    const [rows] = await db.query(THREAD_JOIN, [req.params.actionId]);
+    res.json({ action: rows[0], thread_status: result.thread?.status, reopened: !!result.thread?.reopened });
   } catch (err) {
     console.error('Update action error:', err);
     res.status(500).json({ error: 'Failed to update action' });
@@ -202,19 +167,10 @@ globalRouter.patch('/:actionId', async (req, res) => {
 // POST /api/actions/:actionId/close
 globalRouter.post('/:actionId/close', async (req, res) => {
   try {
-    await db.query(
-      'UPDATE thread_actions SET is_closed = 1, closed_at = NOW(), closed_by = ? WHERE id = ?',
-      [req.user?.id || null, req.params.actionId]
-    );
-    const [rows] = await db.query(
-      `SELECT ta.*, t.customer_name, t.customer_email, t.ticket_id, t.order_number,
-              t.brand, t.status AS thread_status, t.subject AS thread_subject
-       FROM thread_actions ta JOIN threads t ON t.id = ta.thread_id
-       WHERE ta.id = ?`,
-      [req.params.actionId]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Action not found' });
-    res.json({ action: rows[0] });
+    const result = await closeAction({ actionId: req.params.actionId, userId: req.user?.id });
+    if (result.notFound) return res.status(404).json({ error: 'Action not found' });
+    const [rows] = await db.query(THREAD_JOIN, [req.params.actionId]);
+    res.json({ action: rows[0], thread_status: result.thread?.status, reopened: !!result.thread?.reopened });
   } catch (err) {
     console.error('Close action error:', err);
     res.status(500).json({ error: 'Failed to close action' });

@@ -159,7 +159,12 @@ router.get('/:id', async (req, res) => {
       sla_pct:    sla?.pct    || 0,
     };
 
-    res.json({ thread, messages: messagesWithAttachments, pending });
+    // Action progress is merged into the timeline client-side, the same way
+    // pending sends already are.
+    const { listThreadEvents } = require('../services/actionProgress');
+    const events = await listThreadEvents(req.params.id);
+
+    res.json({ thread, messages: messagesWithAttachments, pending, events });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch thread' });
   }

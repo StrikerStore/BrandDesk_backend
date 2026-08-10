@@ -295,6 +295,42 @@ async function migrate() {
   await addIndex(conn, 'thread_actions', 'idx_act_created_by', 'INDEX idx_act_created_by (created_by)');
   await addIndex(conn, 'thread_actions', 'idx_act_closed_by',  'INDEX idx_act_closed_by (closed_by)');
 
+  // ── Action events (v17) ───────────────────────────────────
+  // thread_actions stores only current state — a set of booleans and one
+  // created_at — so there was no record of when a step happened or who did it.
+  // Deliberately NOT written into `messages`: analytics counts outbound rows
+  // with is_note=1 as each agent's "Notes", and `messages.body` carries the
+  // fulltext index inbox search reads. Checklist chatter belongs in neither.
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS action_events (
+      id         INT AUTO_INCREMENT PRIMARY KEY,
+      action_id  INT NOT NULL,
+      thread_id  INT NOT NULL,
+      event_type ENUM('created','check','uncheck','field','closed','reopened') NOT NULL,
+      field      VARCHAR(64)  NULL,
+      old_value  VARCHAR(500) NULL,
+      new_value  VARCHAR(500) NULL,
+      user_id    INT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_ae_thread (thread_id, created_at),
+      INDEX idx_ae_action (action_id),
+      FOREIGN KEY (action_id) REFERENCES thread_actions(id) ON DELETE CASCADE,
+      FOREIGN KEY (thread_id) REFERENCES threads(id)        ON DELETE CASCADE
+    )
+  `);
+
+  // v17 backfill — existing actions have ticked boxes but no history, and the
+  // only real timestamp available is created_at. One synthesized "logged"
+  // event per action; no invented per-step times. The NOT EXISTS guard makes
+  // a second migrate run a no-op.
+  const [aeBf] = await conn.query(`
+    INSERT INTO action_events (action_id, thread_id, event_type, user_id, created_at)
+    SELECT ta.id, ta.thread_id, 'created', ta.created_by, ta.created_at
+      FROM thread_actions ta
+     WHERE NOT EXISTS (SELECT 1 FROM action_events ae WHERE ae.action_id = ta.id)
+  `);
+  if (aeBf.affectedRows) console.log(`  ✅ action_events backfilled for ${aeBf.affectedRows} action(s)`);
+
   // v14 backfill — best-effort match of the historic free-text resolver name to
   // a user. Typos and the literal 'system' stay NULL and show as Unattributed.
   const [bf] = await conn.query(`
