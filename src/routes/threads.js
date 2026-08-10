@@ -66,9 +66,23 @@ router.get('/', async (req, res) => {
        FROM threads t
        LEFT JOIN users au ON au.id = t.assignee_id
        WHERE ${where}
+       /* Newest activity first, full stop.
+          This used to lead with a CASE on priority that floated every urgent
+          ticket above every normal one regardless of age, so a month-old
+          urgent ticket outranked one from an hour ago and the list looked
+          shuffled to anyone scanning by date. Urgency is still shown on the
+          row and remains filterable.
+
+          The sort key is spelled out rather than referencing the SELECT alias,
+          so ordering never depends on how the server resolves an alias used
+          inside an expression. Ties break on id so paging cannot repeat or
+          skip a row when two threads share a timestamp. */
        ORDER BY
-         CASE t.priority WHEN 'urgent' THEN 1 ELSE 2 END ASC,
-         COALESCE(last_message_at, t.created_at) DESC
+         COALESCE(
+           (SELECT MAX(m.sent_at) FROM messages m WHERE m.thread_id = t.id),
+           t.created_at
+         ) DESC,
+         t.id DESC
        LIMIT ? OFFSET ?`,
       [...params, parseInt(limit), offset]
     );
