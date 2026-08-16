@@ -22,6 +22,11 @@ function getBrands() {
       // "client token" is PayU's name for the OAuth client secret.
       payuClientId:     process.env['PAYU_' + key + '_CLIENT_ID'],
       payuClientSecret: process.env['PAYU_' + key + '_CLIENT_TOKEN'],
+      // Your PayU merchant key. A third, separate credential: the OAuth token
+      // authenticates the API client, but OneAPI still needs to be told which
+      // merchant account to act on, and rejects the call with
+      // "Merchant SDK unavailable for merchantId: null" when it isn't sent.
+      payuMerchantId:   process.env['PAYU_' + key + '_MERCHANT_ID'],
     };
   }).filter(b => b.label && b.email && b.name);
 }

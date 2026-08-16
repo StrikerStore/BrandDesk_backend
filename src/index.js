@@ -23,6 +23,7 @@ const { runAutoAck, runAutoResolve } = require('./services/automation');
 const { flushDueSends } = require('./services/sendQueue');
 const { reconcilePendingPaymentLinks } = require('./services/paymentLinks');
 const { getBrands } = require('./config/brands');
+const { missingCredentials } = require('./services/payu');
 const { requireAuth, requireAdmin } = require('./middleware/authMiddleware');
 
 const app  = express();
@@ -201,10 +202,11 @@ app.listen(PORT, () => {
   // boot which brands can take payments, rather than letting an agent discover
   // it when a customer is waiting.
   const brands = getBrands();
-  const withPayu = brands.filter(b => b.payuClientId && b.payuClientSecret);
-  console.log(`💳 PayU configured for ${withPayu.length}/${brands.length} brand(s)`);
-  for (const b of brands.filter(b => !b.payuClientId || !b.payuClientSecret)) {
-    console.log(`   ⚠ ${b.name}: set PAYU_${b.envKey}_CLIENT_ID and PAYU_${b.envKey}_CLIENT_TOKEN`);
+  const gaps = brands.map(b => ({ brand: b, missing: missingCredentials(b) }));
+  const ready = gaps.filter(g => !g.missing.length);
+  console.log(`💳 PayU configured for ${ready.length}/${brands.length} brand(s)`);
+  for (const { brand, missing } of gaps.filter(g => g.missing.length)) {
+    console.log(`   ⚠ ${brand.name}: set ${missing.map(m => `PAYU_${brand.envKey}_${m}`).join(', ')}`);
   }
 });
 

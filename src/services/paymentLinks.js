@@ -116,12 +116,23 @@ async function reconcilePaymentLink(actionId) {
       WHERE ta.id = ? AND ta.action_type = 'send_payment_link'`,
     [actionId]
   );
-  if (!action) return { skipped: 'not_found' };
+  // These are all normal, not errors — but when a payment is "stuck" the first
+  // question is always which of them fired, so say so.
+  if (!action) {
+    console.warn(`[payu] reconcile ${actionId}: no such payment-link action`);
+    return { skipped: 'not_found' };
+  }
   if (action.payment_status === 'paid') return { skipped: 'already_paid' };
-  if (!action.payment_link_id) return { skipped: 'no_link_id' };
+  if (!action.payment_link_id) {
+    console.warn(`[payu] reconcile ${actionId}: row has no payment_link_id — cannot be confirmed`);
+    return { skipped: 'no_link_id' };
+  }
 
   const brand = getBrandByName(action.brand);
-  if (!brand) return { skipped: 'unknown_brand' };
+  if (!brand) {
+    console.warn(`[payu] reconcile ${actionId}: unknown brand "${action.brand}" — check BRANDS`);
+    return { skipped: 'unknown_brand' };
+  }
 
   const status = await payu.getPaymentLinkStatus({
     brand,
@@ -138,6 +149,11 @@ async function reconcilePaymentLink(actionId) {
     updates.payment_ref      = status.payuRef || null;
     updates.payment_paid_at  = toMysqlDateTime(status.paidAt);
   }
+
+  // The state transition is the one line worth having when reconstructing what
+  // happened to a payment after the fact.
+  console.log(`[payu] reconcile ${actionId}: pending -> ${status.status}` +
+              (status.payuRef ? ` (ref ${status.payuRef})` : ''));
 
   await applySystemUpdate({ actionId, updates });
   return { status: status.status };
@@ -158,6 +174,10 @@ async function reconcilePendingPaymentLinks() {
     [RECONCILE_WINDOW_DAYS]
   );
 
+  // Silent when there is nothing pending — this runs every 2 minutes and an
+  // idle heartbeat would bury the lines that matter.
+  if (!rows.length) return { checked: 0, reconciled: 0 };
+
   let reconciled = 0;
   for (const row of rows) {
     try {
@@ -165,9 +185,10 @@ async function reconcilePendingPaymentLinks() {
       if (result.status && result.status !== 'pending') reconciled++;
     } catch (err) {
       // One brand's expired credentials must not stall every other brand's links.
-      console.error(`Payment link reconcile failed for action ${row.id}:`, err.message);
+      console.error(`[payu] reconcile ${row.id} failed:`, err.message);
     }
   }
+  console.log(`[payu] sweep: ${rows.length} pending link(s), ${reconciled} resolved`);
   return { checked: rows.length, reconciled };
 }
 

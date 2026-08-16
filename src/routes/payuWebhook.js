@@ -29,16 +29,29 @@ async function handlePayuCallback(req, res) {
   res.json({ received: true });
 
   const from = req.params.brandLabel ? ` (${req.params.brandLabel})` : '';
+  const body = req.body || {};
+
+  // Identifiers only. The full body can carry customer email and phone, which
+  // do not belong in application logs — and the identifiers are all that is
+  // needed to work out why a callback did or didn't match.
+  console.log(`[payu] webhook${from}: status=${body.status ?? '?'} ` +
+              `invoice=${body.invoiceNumber ?? body.invoice_number ?? '?'} ` +
+              `txnid=${body.txnid ?? '?'} mihpayid=${body.mihpayid ?? '?'} udf1=${body.udf1 ?? '?'}`);
+
   try {
-    const actionId = await findActionForWebhook(req.body || {});
+    const actionId = await findActionForWebhook(body);
     if (!actionId) {
-      console.warn(`PayU webhook could not be matched to an action${from}`);
+      // Not fatal — the 2-minute sweep reconciles the same link regardless.
+      // Worth a warning because a persistent mismatch means the payload shape
+      // differs from what findActionForWebhook expects.
+      console.warn(`[payu] webhook${from}: no matching action; body keys: ${Object.keys(body).join(', ') || '(empty)'}`);
       return;
     }
+    console.log(`[payu] webhook${from}: matched action ${actionId}`);
     await reconcilePaymentLink(actionId);
   } catch (err) {
     // The response has already gone out; the sweep will retry this link anyway.
-    console.error(`PayU webhook error${from}:`, err.message);
+    console.error(`[payu] webhook${from} error:`, err.message);
   }
 }
 
