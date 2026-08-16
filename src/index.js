@@ -17,9 +17,12 @@ const aiRoutes        = require('./routes/ai');
 const authRoutes      = require('./routes/auth');
 const sendsRoutes     = require('./routes/sends');
 const { threadRouter: actionsRoutes, globalRouter: actionsGlobal } = require('./routes/actions');
+const payuWebhookRoutes = require('./routes/payuWebhook');
 const { syncThreads, syncFromHistory, seedHistoryId } = require('./services/gmail');
 const { runAutoAck, runAutoResolve } = require('./services/automation');
 const { flushDueSends } = require('./services/sendQueue');
+const { reconcilePendingPaymentLinks } = require('./services/paymentLinks');
+const { getBrands } = require('./config/brands');
 const { requireAuth, requireAdmin } = require('./middleware/authMiddleware');
 
 const app  = express();
@@ -81,6 +84,12 @@ app.get('/health',    (req, res) => res.json({ status: 'ok', timestamp: new Date
 // /auth/google requires admin (inside route)
 // /auth/google/callback is public (Google redirect)
 app.use('/auth', authRoutes);
+
+// ── Inbound webhooks (public by necessity) ────────────────────
+// Unauthenticated: PayU cannot present a JWT. The handler treats the payload as
+// an untrusted hint and re-verifies everything against PayU's API, so there is
+// nothing here for a forged POST to exploit. See routes/payuWebhook.js.
+app.use('/webhooks', payuWebhookRoutes);
 
 // ── Protected API routes ──────────────────────────────────────
 app.use('/api/threads',   requireAuth, threadRoutes);
@@ -169,10 +178,34 @@ cron.schedule('0 1 * * *', async () => {
   catch (err) { console.error('Auto-resolve error:', err.message); }
 });
 
+// Reconcile pending payment links against PayU. The webhook makes this mostly
+// redundant — which is the point: a webhook that never arrives, or a PayU
+// dashboard pointed at the wrong URL, costs a two-minute delay rather than an
+// action stuck on "pending" forever.
+let reconcileRunning = false;
+cron.schedule('*/2 * * * *', async () => {
+  if (reconcileRunning) return;
+  reconcileRunning = true;
+  try { await reconcilePendingPaymentLinks(); }
+  catch (err) { console.error('Payment link reconcile error:', err.message); }
+  finally { reconcileRunning = false; }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 BrandDesk backend running on port ${PORT}`);
   console.log(`🔒 Environment: ${isProd ? 'production' : 'development'}`);
   if (isProd) console.log(`🌐 Allowed origins: ${allowedOrigins.join(', ')}`);
+
+  // PayU credentials are per-brand env vars whose names derive from the Gmail
+  // label, so they run long and a typo is easy to make and hard to spot. Say at
+  // boot which brands can take payments, rather than letting an agent discover
+  // it when a customer is waiting.
+  const brands = getBrands();
+  const withPayu = brands.filter(b => b.payuClientId && b.payuClientSecret);
+  console.log(`💳 PayU configured for ${withPayu.length}/${brands.length} brand(s)`);
+  for (const b of brands.filter(b => !b.payuClientId || !b.payuClientSecret)) {
+    console.log(`   ⚠ ${b.name}: set PAYU_${b.envKey}_CLIENT_ID and PAYU_${b.envKey}_CLIENT_TOKEN`);
+  }
 });
 
 // Test commit for deployment - ignore

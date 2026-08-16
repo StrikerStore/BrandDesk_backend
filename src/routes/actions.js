@@ -4,6 +4,7 @@ const {
   VALID_TYPES, pickUpdates,
   createAction, applyActionUpdate, closeAction,
 } = require('../services/actionProgress');
+const { createForThread } = require('../services/paymentLinks');
 
 // Every write below goes through services/actionProgress, which logs the
 // change to action_events and moves the ticket to in progress. The allowed
@@ -18,13 +19,20 @@ const THREAD_JOIN = `
 
 function validateNewAction(body) {
   const { action_type, pickup_jersey, exchange_jersey, alternate_jersey,
-          current_jersey, new_jersey, new_address } = body;
+          current_jersey, new_jersey, new_address, payment_amount } = body;
 
   if (!VALID_TYPES.includes(action_type)) return 'Invalid action_type';
   // pickup_jersey is required for the pickup-based types and for refund
   // (the jersey being refunded)
   if (['exchange', 'return', 'alternate_product', 'refund'].includes(action_type) && !pickup_jersey?.trim()) {
     return 'pickup_jersey is required';
+  }
+  if (action_type === 'send_payment_link') {
+    const amount = Number(payment_amount);
+    if (!Number.isFinite(amount) || amount <= 0) return 'A payment amount greater than 0 is required';
+    // PayU rejects more than two decimals; catching it here gives a better
+    // message than the gateway's.
+    if (Math.round(amount * 100) / 100 !== amount) return 'Amount cannot have more than 2 decimal places';
   }
   if (action_type === 'exchange' && !exchange_jersey?.trim())          return 'exchange_jersey is required for exchange';
   if (action_type === 'alternate_product' && !alternate_jersey?.trim()) return 'alternate_jersey is required for alternate product';
@@ -57,7 +65,29 @@ router.post('/', async (req, res) => {
   if (invalid) return res.status(400).json({ error: invalid });
 
   try {
-    const { action, thread } = await createAction(req.params.threadId, req.body, req.user?.id);
+    const payload = { ...req.body };
+
+    // Mint the PayU link before anything is written. If PayU refuses, no action
+    // row exists — an action claiming a link it never got would be worse than
+    // no action at all.
+    if (payload.action_type === 'send_payment_link') {
+      const amount = Number(payload.payment_amount);
+      try {
+        const link = await createForThread({
+          threadId: req.params.threadId,
+          amount,
+          reason: payload.payment_reason,
+        });
+        Object.assign(payload, link, { payment_amount: amount });
+      } catch (err) {
+        // Misconfiguration and gateway rejection are both the caller's problem
+        // to see plainly, not a generic 500.
+        console.error('Payment link creation error:', err.message);
+        return res.status(err.notConfigured ? 400 : 502).json({ error: err.message });
+      }
+    }
+
+    const { action, thread } = await createAction(req.params.threadId, payload, req.user?.id);
     res.status(201).json({ action, thread_status: thread?.status, reopened: !!thread?.reopened });
   } catch (err) {
     console.error('Create action error:', err);

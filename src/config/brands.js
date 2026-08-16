@@ -6,12 +6,22 @@ function getBrands() {
 
   return raw.split(',').map(entry => {
     const [label, email, ...nameParts] = entry.trim().split(':');
+    const key = label.replace(/-/g, '_').toUpperCase();
     return {
       label: label.trim(),
       email: email.trim(),
       name: nameParts.join(':').trim(),
-      shopifyStore: process.env['SHOPIFY_' + label.replace(/-/g, '_').toUpperCase() + '_STORE'],
-      shopifyToken: process.env['SHOPIFY_' + label.replace(/-/g, '_').toUpperCase() + '_TOKEN'],
+      // The per-brand env-var infix. Exposed because real labels are long
+      // ("customer-ticket-dribble-ticket"), so the derived names run to 45
+      // characters and a typo is easy — error messages quote this back rather
+      // than leaving you to reconstruct it by hand.
+      envKey: key,
+      shopifyStore: process.env['SHOPIFY_' + key + '_STORE'],
+      shopifyToken: process.env['SHOPIFY_' + key + '_TOKEN'],
+      // PayU OAuth credentials, same per-brand env convention as Shopify above.
+      // "client token" is PayU's name for the OAuth client secret.
+      payuClientId:     process.env['PAYU_' + key + '_CLIENT_ID'],
+      payuClientSecret: process.env['PAYU_' + key + '_CLIENT_TOKEN'],
     };
   }).filter(b => b.label && b.email && b.name);
 }

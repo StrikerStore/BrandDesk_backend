@@ -21,6 +21,11 @@ async function buildAckBody({ customerName, brandName, orderNumber, ticketId }) 
     .replace(/\{\{customer_name\}\}/g, firstName)
     .replace(/\{\{brand\}\}/g, brandName)
     .replace(/\{\{order_id\}\}/g,  orderNumber || '[order ID]')
+    // An auto-acknowledgement is sent before any agent has touched the ticket,
+    // so there is never a payment link to fill in. Substituted anyway: leaving
+    // it out would email the customer a literal "{{payment_link}}" if someone
+    // pastes the payment template's wording into the Acknowledgement one.
+    .replace(/\{\{payment_link\}\}/g, '')
     .replace(/\{\{ticket_id\}\}/g, ticketId    || '[ticket ID]');
 }
 

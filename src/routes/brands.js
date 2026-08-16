@@ -9,6 +9,8 @@ router.get('/', (req, res) => {
     email: b.email,
     label: b.label,
     hasShopify: !!(b.shopifyStore && b.shopifyToken),
+    // Booleans only — the credentials themselves never leave the server.
+    hasPayu: !!(b.payuClientId && b.payuClientSecret),
   }));
   res.json(brands);
 });

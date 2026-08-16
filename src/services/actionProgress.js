@@ -16,6 +16,7 @@ const CHECK_FIELDS = [
   'return_created', 'return_received', 'refund_done',
   'alt_order_created', 'original_order_cancelled',
   'size_change_done', 'address_change_done',
+  'payment_link_sent',
 ];
 
 // Free-text columns.
@@ -27,8 +28,20 @@ const TEXT_FIELDS = [
 
 const ACTION_FIELDS = [...TEXT_FIELDS, ...CHECK_FIELDS];
 
+// Money columns. Deliberately NOT in ACTION_FIELDS: `pickUpdates` drops
+// anything unlisted, so no client PATCH can repoint a payment link at another
+// merchant or tick "payment received" by hand. Only the PayU reconciler
+// (services/paymentLinks.js) writes these, and only from PayU's own API.
+const SYSTEM_CHECK_FIELDS = ['payment_received'];
+const SYSTEM_TEXT_FIELDS  = ['payment_status', 'payment_ref', 'payment_paid_at'];
+const SYSTEM_FIELDS = [...SYSTEM_TEXT_FIELDS, ...SYSTEM_CHECK_FIELDS];
+
+// Which columns get a check/uncheck event rather than a field event.
+const BOOLEAN_FIELDS = [...CHECK_FIELDS, ...SYSTEM_CHECK_FIELDS];
+
 const VALID_TYPES = [
   'exchange', 'return', 'alternate_product', 'refund', 'change_size', 'change_address',
+  'send_payment_link',
 ];
 
 /** Pull only the columns a client is allowed to set. */
@@ -123,8 +136,9 @@ async function createAction(threadId, payload, userId) {
     const [result] = await conn.query(
       `INSERT INTO thread_actions
          (thread_id, action_type, pickup_jersey, exchange_jersey, alternate_jersey,
-          current_jersey, new_jersey, new_address, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          current_jersey, new_jersey, new_address, created_by,
+          payment_amount, payment_reason, payment_link, payment_link_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         threadId,
         payload.action_type,
@@ -135,6 +149,12 @@ async function createAction(threadId, payload, userId) {
         payload.new_jersey?.trim()       || null,
         payload.new_address?.trim()      || null,
         userId || null,
+        // Payment columns are server-supplied — the route hands them over only
+        // after PayU has actually minted a link.
+        payload.payment_amount  ?? null,
+        payload.payment_reason?.trim() || null,
+        payload.payment_link    || null,
+        payload.payment_link_id || null,
       ]
     );
 
@@ -166,7 +186,7 @@ async function applyActionUpdate({ actionId, threadId, updates, userId }) {
     const events  = [];
 
     for (const [field, raw] of Object.entries(updates)) {
-      if (CHECK_FIELDS.includes(field)) {
+      if (BOOLEAN_FIELDS.includes(field)) {
         const next = raw ? 1 : 0;
         if (Number(current[field] ? 1 : 0) === next) continue;
         changed[field] = next;
@@ -203,6 +223,27 @@ async function applyActionUpdate({ actionId, threadId, updates, userId }) {
     const [rows] = await conn.query('SELECT * FROM thread_actions WHERE id = ?', [actionId]);
     return { action: rows[0], thread };
   });
+}
+
+/**
+ * Write server-owned columns (the PayU money fields) on an action.
+ *
+ * Routed through `applyActionUpdate` so a reconciliation gets the same
+ * transactional diffing, `action_events` rows and status advance as an agent
+ * edit. Two consequences worth relying on:
+ *
+ *   - It is idempotent. Re-running a reconciliation whose values already match
+ *     writes nothing and logs nothing, so a duplicated webhook is harmless.
+ *   - Events land with `user_id` NULL, which the timeline already renders as
+ *     Unattributed — the honest attribution for something PayU told us.
+ */
+async function applySystemUpdate({ actionId, updates }) {
+  const allowed = {};
+  for (const key of SYSTEM_FIELDS) {
+    if (key in updates) allowed[key] = updates[key];
+  }
+  if (!Object.keys(allowed).length) return { unchanged: true };
+  return applyActionUpdate({ actionId, updates: allowed, userId: null });
 }
 
 /** Close an action. Already-closed actions are left untouched. */
@@ -248,7 +289,7 @@ async function listThreadEvents(threadId) {
 }
 
 module.exports = {
-  ACTION_FIELDS, CHECK_FIELDS, TEXT_FIELDS, VALID_TYPES,
-  pickUpdates, createAction, applyActionUpdate, closeAction,
+  ACTION_FIELDS, CHECK_FIELDS, TEXT_FIELDS, VALID_TYPES, SYSTEM_FIELDS,
+  pickUpdates, createAction, applyActionUpdate, applySystemUpdate, closeAction,
   listThreadEvents, advanceThreadStatus,
 };

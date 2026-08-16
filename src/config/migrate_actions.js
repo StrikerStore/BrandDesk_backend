@@ -8,7 +8,7 @@ async function migrate() {
     CREATE TABLE IF NOT EXISTS thread_actions (
       id INT AUTO_INCREMENT PRIMARY KEY,
       thread_id INT NOT NULL,
-      action_type ENUM('exchange', 'return', 'alternate_product', 'refund', 'change_size', 'change_address') NOT NULL,
+      action_type ENUM('exchange', 'return', 'alternate_product', 'refund', 'change_size', 'change_address', 'send_payment_link') NOT NULL,
 
       pickup_jersey VARCHAR(255),
       exchange_jersey VARCHAR(255),
@@ -36,6 +36,17 @@ async function migrate() {
       -- Change size / address status
       size_change_done TINYINT(1) DEFAULT 0,
       address_change_done TINYINT(1) DEFAULT 0,
+
+      -- Payment link status
+      payment_amount DECIMAL(10,2),
+      payment_reason VARCHAR(255),
+      payment_link VARCHAR(500),
+      payment_link_id VARCHAR(100),
+      payment_ref VARCHAR(100),
+      payment_status VARCHAR(30) NOT NULL DEFAULT 'pending',
+      payment_paid_at DATETIME,
+      payment_link_sent TINYINT(1) DEFAULT 0,
+      payment_received TINYINT(1) DEFAULT 0,
 
       is_closed TINYINT(1) DEFAULT 0,
       closed_at DATETIME,

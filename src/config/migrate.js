@@ -295,6 +295,28 @@ async function migrate() {
   await addIndex(conn, 'thread_actions', 'idx_act_created_by', 'INDEX idx_act_created_by (created_by)');
   await addIndex(conn, 'thread_actions', 'idx_act_closed_by',  'INDEX idx_act_closed_by (closed_by)');
 
+  // v18 — 'send_payment_link' type + its columns
+  try {
+    await conn.query(`ALTER TABLE thread_actions MODIFY COLUMN action_type ENUM('exchange','return','alternate_product','refund','change_size','change_address','send_payment_link') NOT NULL`);
+  } catch (err) {
+    if (!err.message?.includes('Duplicate')) console.log('  ⚠ thread_actions ENUM update (v18):', err.message);
+  }
+  // payment_status is a plain VARCHAR, not an ENUM: PayU owns that vocabulary
+  // and a schema migration per new status value isn't worth it.
+  await addColumn(conn, 'thread_actions', 'payment_amount',    'DECIMAL(10,2) NULL');
+  await addColumn(conn, 'thread_actions', 'payment_reason',    'VARCHAR(255) NULL');
+  await addColumn(conn, 'thread_actions', 'payment_link',      'VARCHAR(500) NULL');
+  await addColumn(conn, 'thread_actions', 'payment_link_id',   'VARCHAR(100) NULL');
+  await addColumn(conn, 'thread_actions', 'payment_ref',       'VARCHAR(100) NULL');
+  await addColumn(conn, 'thread_actions', 'payment_status',    "VARCHAR(30) NOT NULL DEFAULT 'pending'");
+  await addColumn(conn, 'thread_actions', 'payment_paid_at',   'DATETIME NULL');
+  await addColumn(conn, 'thread_actions', 'payment_link_sent', 'TINYINT(1) DEFAULT 0');
+  await addColumn(conn, 'thread_actions', 'payment_received',  'TINYINT(1) DEFAULT 0');
+  // The reconciler sweeps on (action_type, payment_status); the link id is how
+  // a webhook payload maps back to a row.
+  await addIndex(conn, 'thread_actions', 'idx_act_pay_link',   'INDEX idx_act_pay_link (payment_link_id)');
+  await addIndex(conn, 'thread_actions', 'idx_act_pay_status', 'INDEX idx_act_pay_status (action_type, payment_status)');
+
   // ── Action events (v17) ───────────────────────────────────
   // thread_actions stores only current state — a set of booleans and one
   // created_at — so there was no record of when a step happened or who did it.
