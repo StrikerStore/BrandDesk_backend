@@ -11,8 +11,11 @@ const axios = require('axios');
  * from PAYU_<LABEL>_CLIENT_ID / PAYU_<LABEL>_CLIENT_TOKEN.
  */
 
+// PayU's live hosts. Payment links are served by OneAPI — not the apiv2.payu.in
+// host that some older integration notes mention, which does not resolve at all.
+// Both are env-overridable so a sandbox or a future host move needs no deploy.
 const OAUTH_URL   = process.env.PAYU_OAUTH_URL || 'https://accounts.payu.in/oauth/token';
-const API_BASE    = process.env.PAYU_API_BASE  || 'https://apiv2.payu.in';
+const API_BASE    = process.env.PAYU_API_BASE  || 'https://oneapi.payu.in';
 const OAUTH_SCOPE = 'create_payment_links';
 
 const TIMEOUT_MS = 15000;
