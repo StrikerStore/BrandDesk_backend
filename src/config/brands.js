@@ -27,6 +27,10 @@ function getBrands() {
       // merchant account to act on, and rejects the call with
       // "Merchant SDK unavailable for merchantId: null" when it isn't sent.
       payuMerchantId:   process.env['PAYU_' + key + '_MERCHANT_ID'],
+      // Merchant salt — a fourth credential, used only to verify the SHA-512
+      // hash PayU signs its webhooks with. Without it a callback cannot be
+      // trusted and confirmation has to fall back to polling PayU's API.
+      payuSalt:         process.env['PAYU_' + key + '_SALT'],
     };
   }).filter(b => b.label && b.email && b.name);
 }

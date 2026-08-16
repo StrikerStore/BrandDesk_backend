@@ -1,5 +1,5 @@
 const express = require('express');
-const { findActionForWebhook, reconcilePaymentLink } = require('../services/paymentLinks');
+const { findActionForWebhook, applyVerifiedWebhook, reconcilePaymentLink } = require('../services/paymentLinks');
 
 /**
  * PayU payment-link callbacks. The first public inbound endpoint in this app —
@@ -48,6 +48,14 @@ async function handlePayuCallback(req, res) {
       return;
     }
     console.log(`[payu] webhook${from}: matched action ${actionId}`);
+
+    // Preferred path: PayU signs its callbacks, so a hash that checks out is
+    // proof enough to record the payment immediately. Falls through to polling
+    // PayU's API when the signature can't be verified — which is also the only
+    // path available while the payment-links read scope is unavailable.
+    const applied = await applyVerifiedWebhook({ actionId, body });
+    if (applied) return;
+
     await reconcilePaymentLink(actionId);
   } catch (err) {
     // The response has already gone out; the sweep will retry this link anyway.

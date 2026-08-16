@@ -1,4 +1,5 @@
 const axios = require('axios');
+const crypto = require('crypto');
 
 /**
  * The only file that knows PayU's wire format.
@@ -14,9 +15,24 @@ const axios = require('axios');
 // PayU's live hosts. Payment links are served by OneAPI — not the apiv2.payu.in
 // host that some older integration notes mention, which does not resolve at all.
 // Both are env-overridable so a sandbox or a future host move needs no deploy.
-const OAUTH_URL   = process.env.PAYU_OAUTH_URL || 'https://accounts.payu.in/oauth/token';
-const API_BASE    = process.env.PAYU_API_BASE  || 'https://oneapi.payu.in';
-const OAUTH_SCOPE = 'create_payment_links';
+const OAUTH_URL = process.env.PAYU_OAUTH_URL || 'https://accounts.payu.in/oauth/token';
+const API_BASE  = process.env.PAYU_API_BASE  || 'https://oneapi.payu.in';
+
+/**
+ * OAuth scopes, space-separated.
+ *
+ * `create_payment_links` alone mints a token that can create a link but is
+ * rejected by the status endpoint with "Token is either invalid/expired" —
+ * misleading wording for what is really a permissions failure, since the token
+ * in question is seconds old. Reading a link back needs its own grant.
+ *
+ * PAYU_FALLBACK_SCOPE is the safety net: if the broader request is refused
+ * outright, we drop back to creation-only so minting links keeps working while
+ * only reconciliation degrades. Override PAYU_OAUTH_SCOPE if your account
+ * names the read grant differently.
+ */
+const OAUTH_SCOPE    = process.env.PAYU_OAUTH_SCOPE || 'create_payment_links read_payment_links';
+const FALLBACK_SCOPE = process.env.PAYU_FALLBACK_SCOPE || 'create_payment_links';
 
 const TIMEOUT_MS = 15000;
 
@@ -128,6 +144,32 @@ const tokenCache = new Map(); // brandLabel -> { token, expiresAt }
 
 const SKEW_MS = 60_000; // renew a minute early rather than race the expiry
 
+// Which scope string actually worked for a brand, so a rejected broad request
+// is not re-attempted on every token renewal.
+const scopeInUse = new Map(); // brandLabel -> scope string
+
+/** One raw token request. Throws on anything but a token. */
+async function requestToken(brand, scope) {
+  const form = new URLSearchParams({
+    grant_type:    'client_credentials',
+    client_id:     brand.payuClientId,
+    client_secret: brand.payuClientSecret,
+    scope,
+  });
+
+  const { data } = await axios.post(OAUTH_URL, form.toString(), {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    timeout: TIMEOUT_MS,
+  });
+
+  const token = data?.access_token;
+  if (!token) {
+    console.error(`${tag(brand)} token: response had no access_token — keys: ${Object.keys(data || {}).join(', ') || '(empty)'}`);
+    throw new PayuApiError('PayU auth returned no access_token');
+  }
+  return { token, ttlSec: Number(data.expires_in) || 3600, grantedScope: data.scope };
+}
+
 async function getAccessToken(brand) {
   assertConfigured(brand);
 
@@ -137,41 +179,43 @@ async function getAccessToken(brand) {
     return cached.token;
   }
 
-  const form = new URLSearchParams({
-    grant_type:    'client_credentials',
-    client_id:     brand.payuClientId,
-    client_secret: brand.payuClientSecret,
-    scope:         OAUTH_SCOPE,
-  });
+  const wanted = scopeInUse.get(brand.label) || OAUTH_SCOPE;
+  log(brand, `token: requesting from ${OAUTH_URL} (client_id ${mask(brand.payuClientId)}, secret ${mask(brand.payuClientSecret)}, scope "${wanted}")`);
 
-  log(brand, `token: requesting from ${OAUTH_URL} (client_id ${mask(brand.payuClientId)}, secret ${mask(brand.payuClientSecret)})`);
-
-  let data;
+  let result;
   try {
-    ({ data } = await axios.post(OAUTH_URL, form.toString(), {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      timeout: TIMEOUT_MS,
-    }));
+    result = await requestToken(brand, wanted);
   } catch (err) {
-    logFailure(brand, 'token request', err);
-    // invalid_client here means the CLIENT_ID/CLIENT_TOKEN pair is wrong — a
-    // different problem from a merchant id or payload issue further down.
-    throw Object.assign(
-      new PayuApiError(`PayU auth failed: ${describeError(err)}`, err.response?.status),
-      { logged: true }
-    );
+    // Only a rejected *scope* is worth retrying narrower. Bad credentials fail
+    // identically at any scope, so retrying would just double the noise.
+    const retryable = wanted !== FALLBACK_SCOPE && err.response?.status;
+    if (!retryable) {
+      logFailure(brand, 'token request', err);
+      throw Object.assign(
+        new PayuApiError(`PayU auth failed: ${describeError(err)}`, err.response?.status),
+        { logged: true }
+      );
+    }
+    console.warn(`${tag(brand)} token: scope "${wanted}" refused (HTTP ${err.response.status}) — falling back to "${FALLBACK_SCOPE}"`);
+    console.warn(`${tag(brand)}   link creation will work; status reconciliation will keep failing until the read scope is right`);
+    try {
+      result = await requestToken(brand, FALLBACK_SCOPE);
+      scopeInUse.set(brand.label, FALLBACK_SCOPE);
+    } catch (err2) {
+      logFailure(brand, 'token request (fallback scope)', err2);
+      throw Object.assign(
+        new PayuApiError(`PayU auth failed: ${describeError(err2)}`, err2.response?.status),
+        { logged: true }
+      );
+    }
   }
 
-  const token = data?.access_token;
-  if (!token) {
-    console.error(`${tag(brand)} token: response had no access_token — keys: ${Object.keys(data || {}).join(', ') || '(empty)'}`);
-    throw new PayuApiError('PayU auth returned no access_token');
-  }
-
-  const ttlSec = Number(data.expires_in) || 3600;
-  log(brand, `token: acquired, valid ${ttlSec}s`);
-  tokenCache.set(brand.label, { token, expiresAt: Date.now() + ttlSec * 1000 });
-  return token;
+  // PayU echoes the scopes it actually granted, which may be narrower than the
+  // ones asked for — the difference is exactly what a later 401 will be about.
+  const granted = result.grantedScope ? ` granted="${result.grantedScope}"` : '';
+  log(brand, `token: acquired, valid ${result.ttlSec}s${granted}`);
+  tokenCache.set(brand.label, { token: result.token, expiresAt: Date.now() + result.ttlSec * 1000 });
+  return result.token;
 }
 
 /** Drop a cached token — used once on 401 so an expired token self-heals. */
@@ -208,7 +252,19 @@ async function authedRequest(brand, config) {
     if (err.response?.status !== 401) throw err;
     log(brand, '401 on an authenticated call — refreshing token and retrying once');
     invalidateToken(brand);
-    return send();
+    try {
+      return await send();
+    } catch (err2) {
+      // A brand-new token rejected as "invalid/expired" is not about expiry.
+      // Say so, because the wording PayU returns sends you hunting the wrong bug.
+      if (err2.response?.status === 401) {
+        console.error(`${tag(brand)} still 401 with a token seconds old — this is a PERMISSIONS problem, not expiry.`);
+        console.error(`${tag(brand)}   current scope: "${scopeInUse.get(brand.label) || OAUTH_SCOPE}"`);
+        console.error(`${tag(brand)}   if link creation works but this call doesn't, the scope is missing the read grant.`);
+        console.error(`${tag(brand)}   check the scope name in your PayU dashboard and set PAYU_OAUTH_SCOPE to match.`);
+      }
+      throw err2;
+    }
   }
 }
 
@@ -355,9 +411,63 @@ async function getPaymentLinkStatus({ brand, invoiceId }) {
   };
 }
 
+// ── Webhook verification ─────────────────────────────────────────────────────
+
+/**
+ * Check the SHA-512 signature PayU puts on its callbacks.
+ *
+ * This is what makes a webhook trustworthy enough to act on directly. Without
+ * it the payload is just an unauthenticated POST claiming money changed hands,
+ * and anyone who guessed a thread id and an amount could mark an order paid.
+ *
+ * The formula is PayU's "reverse hash" — the request hash sequence, mirrored,
+ * salted at the front:
+ *
+ *   sha512(salt|status|||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
+ *
+ * with five empty fields between `status` and `udf5`, mirroring the unused
+ * udf6–udf10 slots in the forward hash.
+ */
+function verifyWebhookHash(brand, body = {}) {
+  if (!brand?.payuSalt) return { ok: false, reason: 'no_salt' };
+
+  const received = String(body.hash || '').toLowerCase();
+  if (!received) return { ok: false, reason: 'no_hash' };
+
+  const f = (k) => String(body[k] ?? '');
+  const parts = [
+    brand.payuSalt, f('status'), '', '', '', '', '',
+    f('udf5'), f('udf4'), f('udf3'), f('udf2'), f('udf1'),
+    f('email'), f('firstname'), f('productinfo'), f('amount'), f('txnid'), f('key'),
+  ];
+  // PayU prepends additionalCharges to the sequence when the payment carried any.
+  if (body.additionalCharges) parts.unshift(String(body.additionalCharges));
+
+  const expected = crypto.createHash('sha512').update(parts.join('|')).digest('hex');
+
+  const a = Buffer.from(expected, 'utf8');
+  const b = Buffer.from(received, 'utf8');
+  const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+  return ok ? { ok: true } : { ok: false, reason: 'mismatch', expected };
+}
+
+/** Read the payment result out of a callback body. */
+function parseWebhookPayment(body = {}) {
+  return {
+    status:    normaliseStatus(body.status),
+    rawStatus: String(body.status || '').slice(0, 30),
+    payuRef:   body.mihpayid || null,
+    paidAt:    body.addedon || null,
+    amount:    body.amount != null ? Number(body.amount) : null,
+    merchantKey: body.key || null,
+  };
+}
+
 module.exports = {
   createPaymentLink,
   getPaymentLinkStatus,
+  verifyWebhookHash,
+  parseWebhookPayment,
   missingCredentials,
   normaliseStatus,
   PayuNotConfiguredError,

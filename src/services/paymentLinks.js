@@ -160,6 +160,78 @@ async function reconcilePaymentLink(actionId) {
 }
 
 /**
+ * Apply a callback body directly, once its signature checks out.
+ *
+ * The original design deliberately ignored webhook contents and re-read state
+ * from PayU's API. That is still the safer default, but it only works if the
+ * API answers — and the payment-links read grant is a separate OAuth scope that
+ * may not be enabled. A hash-verified callback is trustworthy on its own, so
+ * this path confirms payments the moment they happen and leaves the API poll as
+ * the backstop rather than the critical dependency.
+ *
+ * Returns null when the payload cannot be trusted, so the caller falls back.
+ */
+async function applyVerifiedWebhook({ actionId, body }) {
+  const [[action]] = await db.query(
+    `SELECT ta.id, ta.payment_amount, ta.payment_status, t.brand
+       FROM thread_actions ta
+       JOIN threads t ON t.id = ta.thread_id
+      WHERE ta.id = ? AND ta.action_type = 'send_payment_link'`,
+    [actionId]
+  );
+  if (!action) return null;
+
+  const brand = getBrandByName(action.brand);
+  if (!brand) return null;
+
+  const check = payu.verifyWebhookHash(brand, body);
+  if (!check.ok) {
+    // Not an error on its own — an unsigned callback simply isn't sufficient
+    // evidence, and the API poll will settle it.
+    console.warn(`[payu] webhook ${actionId}: signature not trusted (${check.reason}) — deferring to API reconcile`);
+    if (check.reason === 'no_salt') {
+      console.warn(`[payu]   set PAYU_${brand.envKey}_SALT to confirm payments straight from the callback`);
+    }
+    if (check.reason === 'mismatch') {
+      // Hashes are not secret and the salt is never printed. Seeing both is the
+      // only way to tell a wrong salt from a wrong hash sequence.
+      console.warn(`[payu]   expected ${check.expected}`);
+      console.warn(`[payu]   received ${String(body.hash || '').toLowerCase()}`);
+      console.warn(`[payu]   equal length but different value usually means the salt is wrong, not the formula`);
+    }
+    return null;
+  }
+
+  const payment = payu.parseWebhookPayment(body);
+
+  // Belt and braces on a verified payload: the amount must be the one we asked
+  // for. A signature proves PayU sent it; this proves it is about this charge.
+  const expected = Number(action.payment_amount);
+  if (payment.amount != null && Number.isFinite(expected) && Math.abs(payment.amount - expected) > 0.009) {
+    console.error(`[payu] webhook ${actionId}: amount mismatch — callback ${payment.amount}, action ${expected}. Refusing.`);
+    return null;
+  }
+
+  if (payment.status !== 'paid') {
+    console.log(`[payu] webhook ${actionId}: verified, status "${payment.rawStatus}" (not a payment) — recording`);
+    await applySystemUpdate({ actionId, updates: { payment_status: payment.rawStatus } });
+    return { status: payment.status };
+  }
+
+  console.log(`[payu] webhook ${actionId}: verified paid, ref ${payment.payuRef}`);
+  await applySystemUpdate({
+    actionId,
+    updates: {
+      payment_status:   payment.rawStatus || 'success',
+      payment_received: 1,
+      payment_ref:      payment.payuRef || null,
+      payment_paid_at:  toMysqlDateTime(payment.paidAt),
+    },
+  });
+  return { status: 'paid' };
+}
+
+/**
  * Safety net for missed or misconfigured webhooks. Because the reconciler is
  * authoritative, a webhook that never arrives costs a delay, not a stuck action.
  */
@@ -195,6 +267,7 @@ async function reconcilePendingPaymentLinks() {
 module.exports = {
   createForThread,
   findActionForWebhook,
+  applyVerifiedWebhook,
   reconcilePaymentLink,
   reconcilePendingPaymentLinks,
 };
