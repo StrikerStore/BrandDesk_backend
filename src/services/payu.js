@@ -390,33 +390,88 @@ async function getPaymentLinkStatus({ brand, invoiceId }) {
     }
   }
 
-  // The query-filter form answers with a list; the path form with one object.
-  const payload = data?.result || data;
-  const result = Array.isArray(payload) ? payload[0] : payload;
-  if (!result) throw new PayuApiError(`PayU has no record of invoice ${invoiceId}`);
+  const parsed = parseLinkStatus(data);
+  if (!parsed) throw new PayuApiError(`PayU has no record of invoice ${invoiceId}`);
 
-  // A link can carry several transaction attempts; the successful one wins.
-  const txns = result?.transactions || result?.transaction || [];
-  const paidTxn = (Array.isArray(txns) ? txns : [txns])
-    .find(t => t && normaliseStatus(t.status) === 'paid');
+  logDebug(brand, `status: invoice ${invoiceId} link="${parsed.linkStatus}" payment="${parsed.rawStatus}" -> ${parsed.status}`);
 
-  const status = paidTxn ? 'paid' : normaliseStatus(result?.status);
-  logDebug(brand, `status: invoice ${invoiceId} raw="${result?.status}" -> ${status}`);
-
-  // "expired" and "failed" are the answers that surprise people, because PayU
-  // also marks a link expired once it has been *used*. If a payment really did
-  // go through, the evidence is in the body — so print it rather than leaving
-  // a paid order looking unpaid with no way to tell why.
-  if (status !== 'paid' && status !== 'pending') {
-    console.warn(`${tag(brand)} status: invoice ${invoiceId} resolved "${status}" with no successful transaction found`);
+  // A terminal non-paid answer is worth explaining, since it is the one that
+  // leaves an order looking unpaid.
+  if (parsed.status !== 'paid' && parsed.status !== 'pending') {
+    console.warn(`${tag(brand)} status: invoice ${invoiceId} resolved "${parsed.status}" — no payment found`);
     console.warn(`${tag(brand)}   raw body: ${JSON.stringify(data).slice(0, 1500)}`);
   }
 
+  return parsed;
+}
+
+/**
+ * Decide whether a payment-link body represents a paid link.
+ *
+ * Split out from the HTTP call so it can be tested against real PayU responses;
+ * see payu.test.js.
+ *
+ * The trap this exists to avoid: `result.status` describes the **link's
+ * lifecycle**, not the money. A one-payment link flips to "expired" the moment
+ * it is used, so a fully paid link reports:
+ *
+ *     status: "expired", paymentStatus: "Paid", amountStatus: "FULLY_PAID"
+ *
+ * Reading `status` alone therefore reports a successful payment as expired.
+ * The payment-bearing fields are checked first and the lifecycle status is only
+ * a fallback for links that were never paid at all. There is no `transactions`
+ * array in this account's responses, though it is still honoured if present.
+ */
+function parseLinkStatus(data) {
+  // The query-filter form answers with a list; the path form with one object.
+  const payload = data?.result || data;
+  const result = Array.isArray(payload) ? payload[0] : payload;
+  if (!result || typeof result !== 'object') return null;
+
+  // An object with none of the expected keys is not an unpaid link — it is a
+  // body we do not understand. Returning "pending" for it would quietly hide a
+  // change in PayU's contract behind a plausible-looking answer, so say we
+  // could not read it and let the caller raise.
+  const RECOGNISED = ['status', 'paymentStatus', 'amountStatus', 'invoiceNumber',
+                      'totalAmountCollected', 'totalAmount', 'transactions'];
+  if (!RECOGNISED.some(k => k in result)) return null;
+
+  const paymentStatus = String(result.paymentStatus || '').toLowerCase();
+  const amountStatus  = String(result.amountStatus  || '').toUpperCase();
+
+  const txns = result.transactions || result.transaction || [];
+  const paidTxn = (Array.isArray(txns) ? txns : [txns])
+    .find(t => t && normaliseStatus(t.status) === 'paid');
+
+  const collected = Number(result.totalAmountCollected);
+  const total     = Number(result.totalAmount ?? result.subAmount);
+  const fullyCollected = Number.isFinite(collected) && Number.isFinite(total)
+    && total > 0 && collected + 0.009 >= total;
+
+  // A partial payment is not a paid order, whatever the other fields imply.
+  const partial = amountStatus === 'PARTIALLY_PAID';
+
+  const isPaid = !partial && (
+    paymentStatus === 'paid' ||
+    amountStatus === 'FULLY_PAID' ||
+    !!paidTxn ||
+    fullyCollected
+  );
+
+  const linkStatus = String(result.status || '');
+
   return {
-    status,
-    rawStatus: String(paidTxn?.status || result?.status || '').slice(0, 30) || status,
-    payuRef:   paidTxn?.mihpayid || paidTxn?.payuId || result?.mihpayid || null,
-    paidAt:    paidTxn?.addedOn || paidTxn?.paidAt || result?.paidAt || null,
+    status:     isPaid ? 'paid' : normaliseStatus(linkStatus),
+    // Prefer the payment word over the lifecycle word, so the UI shows "Paid"
+    // rather than "expired" on a settled order.
+    rawStatus:  String(paidTxn?.status || result.paymentStatus || linkStatus || '').slice(0, 30),
+    linkStatus,
+    payuRef:    paidTxn?.mihpayid || paidTxn?.payuId || result.mihpayid || result.transactionId || null,
+    // Deliberately not falling back to expiryDate: for a one-payment link it
+    // happens to equal the payment time, but for a link with a real expiry
+    // window it is a future date, and a payment dated in the future is worse
+    // than one dated at reconciliation. The webhook carries the true time.
+    paidAt:     paidTxn?.addedOn || paidTxn?.paidAt || result.paidAt || null,
   };
 }
 
@@ -475,6 +530,7 @@ function parseWebhookPayment(body = {}) {
 module.exports = {
   createPaymentLink,
   getPaymentLinkStatus,
+  parseLinkStatus,
   verifyWebhookHash,
   parseWebhookPayment,
   missingCredentials,
