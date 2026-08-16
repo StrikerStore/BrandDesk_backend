@@ -110,7 +110,7 @@ async function findActionForWebhook(body = {}) {
  */
 async function reconcilePaymentLink(actionId) {
   const [[action]] = await db.query(
-    `SELECT ta.id, ta.payment_link_id, ta.payment_status, t.brand
+    `SELECT ta.id, ta.payment_link_id, ta.payment_status, ta.payment_received, t.brand
        FROM thread_actions ta
        JOIN threads t ON t.id = ta.thread_id
       WHERE ta.id = ? AND ta.action_type = 'send_payment_link'`,
@@ -122,7 +122,11 @@ async function reconcilePaymentLink(actionId) {
     console.warn(`[payu] reconcile ${actionId}: no such payment-link action`);
     return { skipped: 'not_found' };
   }
-  if (action.payment_status === 'paid') return { skipped: 'already_paid' };
+  // Guard on the boolean, not the status word. payment_status holds PayU's own
+  // vocabulary ("success", "captured"), never the literal "paid" — so comparing
+  // against "paid" never matched, and a later poll could overwrite a settled
+  // payment with the link-level "expired" PayU reports once a link is used.
+  if (action.payment_received) return { skipped: 'already_paid' };
   if (!action.payment_link_id) {
     console.warn(`[payu] reconcile ${actionId}: row has no payment_link_id — cannot be confirmed`);
     return { skipped: 'no_link_id' };

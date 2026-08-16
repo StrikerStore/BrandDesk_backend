@@ -403,6 +403,15 @@ async function getPaymentLinkStatus({ brand, invoiceId }) {
   const status = paidTxn ? 'paid' : normaliseStatus(result?.status);
   logDebug(brand, `status: invoice ${invoiceId} raw="${result?.status}" -> ${status}`);
 
+  // "expired" and "failed" are the answers that surprise people, because PayU
+  // also marks a link expired once it has been *used*. If a payment really did
+  // go through, the evidence is in the body — so print it rather than leaving
+  // a paid order looking unpaid with no way to tell why.
+  if (status !== 'paid' && status !== 'pending') {
+    console.warn(`${tag(brand)} status: invoice ${invoiceId} resolved "${status}" with no successful transaction found`);
+    console.warn(`${tag(brand)}   raw body: ${JSON.stringify(data).slice(0, 1500)}`);
+  }
+
   return {
     status,
     rawStatus: String(paidTxn?.status || result?.status || '').slice(0, 30) || status,

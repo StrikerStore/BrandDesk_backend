@@ -4,7 +4,7 @@ const {
   VALID_TYPES, pickUpdates,
   createAction, applyActionUpdate, closeAction,
 } = require('../services/actionProgress');
-const { createForThread } = require('../services/paymentLinks');
+const { createForThread, reconcilePaymentLink } = require('../services/paymentLinks');
 
 // Every write below goes through services/actionProgress, which logs the
 // change to action_events and moves the ticket to in progress. The allowed
@@ -116,6 +116,32 @@ router.patch('/:actionId', async (req, res) => {
   }
 });
 
+/**
+ * Ask PayU for a payment link's status right now.
+ *
+ * The webhook and the two-minute sweep between them handle this automatically,
+ * but an agent on the phone to a customer who says "I've paid" should not have
+ * to wait on either — nor guess whether the delay is PayU's or ours.
+ *
+ * Reuses the same reconcile path, so a manual refresh and an automatic one
+ * cannot disagree.
+ */
+async function refreshPayment(req, res) {
+  try {
+    const result = await reconcilePaymentLink(req.params.actionId);
+    const [rows] = await db.query(THREAD_JOIN, [req.params.actionId]);
+    if (!rows.length) return res.status(404).json({ error: 'Action not found' });
+    res.json({ action: rows[0], result });
+  } catch (err) {
+    console.error('Refresh payment error:', err.message);
+    // The gateway being unreachable is not the caller's fault; say so plainly
+    // so the agent knows to retry rather than assuming the payment failed.
+    res.status(502).json({ error: err.message || 'Could not reach PayU' });
+  }
+}
+
+router.post('/:actionId/refresh-payment', refreshPayment);
+
 // POST /api/threads/:threadId/actions/:actionId/close
 router.post('/:actionId/close', async (req, res) => {
   try {
@@ -193,6 +219,9 @@ globalRouter.patch('/:actionId', async (req, res) => {
     res.status(500).json({ error: 'Failed to update action' });
   }
 });
+
+// POST /api/actions/:actionId/refresh-payment — same handler, consolidated view
+globalRouter.post('/:actionId/refresh-payment', refreshPayment);
 
 // POST /api/actions/:actionId/close
 globalRouter.post('/:actionId/close', async (req, res) => {
