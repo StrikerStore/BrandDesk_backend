@@ -19,43 +19,54 @@ const {
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
+// Shared filter → WHERE translation for the list and stats endpoints, so the
+// tab badges always count exactly what the list can show. `includeStatus:
+// false` lets stats keep a per-status breakdown under the other filters.
+function buildThreadWhere(query, user, { includeStatus = true } = {}) {
+  const { brand, status, priority, tag, search, assignee } = query;
+
+  let where = '(t.snoozed_until IS NULL OR t.snoozed_until <= NOW())';
+  const params = [];
+
+  if (brand && brand !== 'all') { where += ' AND t.brand = ?'; params.push(brand); }
+  if (includeStatus && status && status !== 'all') { where += ' AND t.status = ?'; params.push(status); }
+  // `me` and `unassigned` are the two that matter day to day; a raw id is
+  // accepted so a lead can look at one agent's queue.
+  if (assignee === 'me')              { where += ' AND t.assignee_id = ?'; params.push(user?.id || 0); }
+  else if (assignee === 'unassigned') { where += ' AND t.assignee_id IS NULL'; }
+  else if (assignee)                  { where += ' AND t.assignee_id = ?'; params.push(parseInt(assignee) || 0); }
+  if (priority) { where += ' AND t.priority = ?'; params.push(priority); }
+  if (tag) { where += ' AND JSON_CONTAINS(t.tags, ?)'; params.push(JSON.stringify(tag)); }
+  if (search) {
+    const q = `%${search}%`;
+    const clauses = [
+      't.customer_name LIKE ?', 't.customer_email LIKE ?', 't.ticket_id LIKE ?',
+      't.order_number LIKE ?', 't.subject LIKE ?', 't.tags LIKE ?',
+      't.order_id_resolved LIKE ?',
+    ];
+    params.push(q, q, q, q, q, q, q);
+
+    // Searching "#4334" should find a ticket stored as "DS4334" — match the
+    // bare digits against both order columns as well
+    const { digits } = normalizeOrderInput(search);
+    if (digits) {
+      clauses.push('t.order_number LIKE ?', 't.order_id_resolved LIKE ?');
+      params.push(`%${digits}%`, `%${digits}%`);
+    }
+
+    where += ` AND (${clauses.join(' OR ')})`;
+  }
+
+  return { where, params };
+}
+
 // GET /api/threads
 router.get('/', async (req, res) => {
   try {
-    const { brand, status, priority, tag, search, assignee, page = 1, limit = 50 } = req.query;
+    const { page = 1, limit = 50 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    let where = '(t.snoozed_until IS NULL OR t.snoozed_until <= NOW())';
-    const params = [];
-
-    if (brand && brand !== 'all') { where += ' AND t.brand = ?'; params.push(brand); }
-    if (status && status !== 'all') { where += ' AND t.status = ?'; params.push(status); }
-    // `me` and `unassigned` are the two that matter day to day; a raw id is
-    // accepted so a lead can look at one agent's queue.
-    if (assignee === 'me')              { where += ' AND t.assignee_id = ?'; params.push(req.user?.id || 0); }
-    else if (assignee === 'unassigned') { where += ' AND t.assignee_id IS NULL'; }
-    else if (assignee)                  { where += ' AND t.assignee_id = ?'; params.push(parseInt(assignee) || 0); }
-    if (priority) { where += ' AND t.priority = ?'; params.push(priority); }
-    if (tag) { where += ' AND JSON_CONTAINS(t.tags, ?)'; params.push(JSON.stringify(tag)); }
-    if (search) {
-      const q = `%${search}%`;
-      const clauses = [
-        't.customer_name LIKE ?', 't.customer_email LIKE ?', 't.ticket_id LIKE ?',
-        't.order_number LIKE ?', 't.subject LIKE ?', 't.tags LIKE ?',
-        't.order_id_resolved LIKE ?',
-      ];
-      params.push(q, q, q, q, q, q, q);
-
-      // Searching "#4334" should find a ticket stored as "DS4334" — match the
-      // bare digits against both order columns as well
-      const { digits } = normalizeOrderInput(search);
-      if (digits) {
-        clauses.push('t.order_number LIKE ?', 't.order_id_resolved LIKE ?');
-        params.push(`%${digits}%`, `%${digits}%`);
-      }
-
-      where += ` AND (${clauses.join(' OR ')})`;
-    }
+    const { where, params } = buildThreadWhere(req.query, req.user);
 
     const [threads] = await db.query(
       `SELECT t.*,
@@ -110,9 +121,16 @@ router.get('/', async (req, res) => {
 });
 
 // GET /api/threads/stats/overview
+// Accepts the same filter params as GET / (brand, search, assignee, priority,
+// tag) so the tab badges track the active filters; status is deliberately
+// ignored so every tab keeps its own count. Called with no params (AppShell
+// nav badge) it still returns unfiltered totals.
 router.get('/stats/overview', async (req, res) => {
   try {
-    const [byStatus] = await db.query("SELECT status, COUNT(*) as count FROM threads GROUP BY status");
+    const { where, params } = buildThreadWhere(req.query, req.user, { includeStatus: false });
+    const [byStatus] = await db.query(
+      `SELECT t.status, COUNT(*) as count FROM threads t WHERE ${where} GROUP BY t.status`, params
+    );
     const [byBrand]  = await db.query("SELECT brand, COUNT(*) as count FROM threads GROUP BY brand");
     const [unread]   = await db.query("SELECT COUNT(*) as count FROM threads WHERE is_unread = 1");
     const [urgent]   = await db.query("SELECT COUNT(*) as count FROM threads WHERE priority = 'urgent' AND status != 'resolved'");
