@@ -18,6 +18,17 @@ const toDateStr = (d) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
 
+/**
+ * Shift a stored timestamp into IST.
+ *
+ * Everything is stored UTC — db.js pins the pool to +00:00 and the MySQL
+ * session runs on UTC too — but the team works Mon–Sat 10 AM–8 PM IST, so an
+ * hour-of-day bucket only means anything once shifted. The numeric-offset form
+ * of CONVERT_TZ needs no mysql timezone tables loaded, unlike a named zone such
+ * as 'Asia/Kolkata'.
+ */
+const IST = (col) => `CONVERT_TZ(${col}, '+00:00', '+05:30')`;
+
 const daysBetween = (from, to) =>
   Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
 
@@ -437,6 +448,162 @@ async function getResolvedByName(f) {
   }));
 }
 
+// ── Hour-of-day activity ────────────────────────────────────────────────────
+
+const HOUR_LABELS = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, '0')}:00`);
+
+/**
+ * When in the day an agent is actually working, bucketed by hour in IST.
+ *
+ * The rest of this file answers "how much" over a period; this answers "when".
+ * Counts resolutions, replies, internal notes and closed actions — resolutions
+ * alone are far too sparse to tell you whether someone was at their desk at
+ * 3 PM.
+ *
+ * Both the day and the hour are grouped in IST. Summing straight into 24
+ * buckets would make "active hours" mean "hours of the day this agent was ever
+ * active", which over a month approaches 24 and says nothing; grouping by day
+ * as well lets the per-day figure be a real answer.
+ */
+async function getHourlyActivity(f) {
+  const resolvedSql = [
+    `t.status='resolved'`,
+    `t.resolved_at IS NOT NULL`,
+    `DATE(${IST('t.resolved_at')}) BETWEEN ? AND ?`,
+  ];
+  const resolvedParams = [f.from, f.to];
+  if (f.brand)   { resolvedSql.push('t.brand = ?');               resolvedParams.push(f.brand); }
+  if (f.agentId) { resolvedSql.push('t.resolved_by_user_id = ?'); resolvedParams.push(f.agentId); }
+
+  // messages.user_id is NULL for inbound mail and system sends (auto-ack,
+  // auto-resolve notes), so it doubles as the "a person did this" filter.
+  const msgSql = [
+    `m.direction='outbound'`,
+    `m.user_id IS NOT NULL`,
+    `DATE(${IST('m.sent_at')}) BETWEEN ? AND ?`,
+  ];
+  const msgParams = [f.from, f.to];
+  if (f.brand)   { msgSql.push('t.brand = ?');   msgParams.push(f.brand); }
+  if (f.agentId) { msgSql.push('m.user_id = ?'); msgParams.push(f.agentId); }
+
+  const actSql = [
+    `a.is_closed = 1`,
+    `a.closed_at IS NOT NULL`,
+    `DATE(${IST('a.closed_at')}) BETWEEN ? AND ?`,
+  ];
+  const actParams = [f.from, f.to];
+  if (f.brand)   { actSql.push('t.brand = ?');     actParams.push(f.brand); }
+  if (f.agentId) { actSql.push('a.closed_by = ?'); actParams.push(f.agentId); }
+
+  // DATE_FORMAT rather than DATE so the day comes back as a string. A bare
+  // DATE() arrives as a JS Date at UTC midnight, which reads back as the
+  // previous day for anyone running the server west of Greenwich.
+  const [[resolvedRows], [msgRows], [actionRows]] = await Promise.all([
+    db.query(`
+      SELECT DATE_FORMAT(${IST('t.resolved_at')}, '%Y-%m-%d') d,
+             HOUR(${IST('t.resolved_at')}) h, COUNT(*) n
+      FROM threads t WHERE ${resolvedSql.join(' AND ')}
+      GROUP BY d, h
+    `, resolvedParams),
+    db.query(`
+      SELECT DATE_FORMAT(${IST('m.sent_at')}, '%Y-%m-%d') d,
+             HOUR(${IST('m.sent_at')}) h,
+             SUM(m.is_note = 0) replies, SUM(m.is_note = 1) notes
+      FROM messages m JOIN threads t ON t.id = m.thread_id
+      WHERE ${msgSql.join(' AND ')}
+      GROUP BY d, h
+    `, msgParams),
+    db.query(`
+      SELECT DATE_FORMAT(${IST('a.closed_at')}, '%Y-%m-%d') d,
+             HOUR(${IST('a.closed_at')}) h, COUNT(*) n
+      FROM thread_actions a JOIN threads t ON t.id = a.thread_id
+      WHERE ${actSql.join(' AND ')}
+      GROUP BY d, h
+    `, actParams),
+  ]);
+
+  const hours = HOUR_LABELS.map((label, hour) => ({
+    hour, label, resolved: 0, replies: 0, notes: 0, actions_closed: 0, total: 0,
+  }));
+
+  const days = new Map();
+  const dayFor = (date) => {
+    if (!days.has(date)) {
+      days.set(date, { date, active: new Set(), resolved: 0, replies: 0, notes: 0, actions_closed: 0 });
+    }
+    return days.get(date);
+  };
+
+  // An hour counts as worked if anything at all happened in it, notes included
+  const fold = (rows, counts) => {
+    for (const r of rows) {
+      const h = Number(r.h);
+      if (!Number.isInteger(h) || h < 0 || h > 23) continue;
+      const bucket = hours[h];
+      const day = dayFor(r.d);
+      let any = 0;
+      for (const [key, n] of Object.entries(counts(r))) {
+        bucket[key] += n;
+        day[key]    += n;
+        any         += n;
+      }
+      bucket.total += any;
+      if (any > 0) day.active.add(h);
+    }
+  };
+
+  fold(resolvedRows, r => ({ resolved: Number(r.n) || 0 }));
+  fold(msgRows,      r => ({ replies: Number(r.replies) || 0, notes: Number(r.notes) || 0 }));
+  fold(actionRows,   r => ({ actions_closed: Number(r.n) || 0 }));
+
+  const by_day = [...days.values()]
+    .map(d => {
+      const active = [...d.active].sort((a, b) => a - b);
+      return {
+        date: d.date,
+        label: new Date(`${d.date}T00:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
+        active_hours: active.length,
+        first_hour: active.length ? active[0] : null,
+        last_hour:  active.length ? active[active.length - 1] : null,
+        resolved: d.resolved, replies: d.replies,
+        notes: d.notes, actions_closed: d.actions_closed,
+      };
+    })
+    .filter(d => d.active_hours > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const sum = (k) => hours.reduce((n, h) => n + h[k], 0);
+  const activeHours = hours.filter(h => h.total > 0);
+  const daysActive = by_day.length;
+
+  // Across a range this is the average over the days actually worked, not over
+  // the calendar range — a week off shouldn't read as a shorter working day.
+  const avgActive = daysActive
+    ? Math.round((by_day.reduce((n, d) => n + d.active_hours, 0) / daysActive) * 10) / 10
+    : 0;
+
+  const peak = activeHours.reduce((best, h) => (!best || h.resolved > best.resolved ? h : best), null);
+
+  return {
+    range: { from: f.from, to: f.to, days: f.days },
+    agent_id: f.agentId,
+    hours,
+    by_day,
+    summary: {
+      total_resolved: sum('resolved'),
+      total_replies:  sum('replies'),
+      total_notes:    sum('notes'),
+      total_actions:  sum('actions_closed'),
+      active_hours: avgActive,
+      days_active:  daysActive,
+      peak_hour:     peak?.resolved ? peak.hour     : null,
+      peak_resolved: peak?.resolved ? peak.resolved : 0,
+      first_hour: activeHours.length ? activeHours[0].hour : null,
+      last_hour:  activeHours.length ? activeHours[activeHours.length - 1].hour : null,
+    },
+  };
+}
+
 // ── Live SLA backlog ────────────────────────────────────────────────────────
 
 async function getSlaBacklog(f) {
@@ -514,5 +681,6 @@ module.exports = {
   getOverview, getVolume, getResponseTime,
   getByBrand, getByIssue, getActionStats,
   getAgentStats, getResolvedByName, getSlaBacklog,
+  getHourlyActivity,
   getTicketRows, getActionRows,
 };

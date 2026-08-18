@@ -6,6 +6,7 @@ const {
   getOverview, getVolume, getResponseTime,
   getByBrand, getByIssue, getActionStats,
   getAgentStats, getResolvedByName, getSlaBacklog,
+  getHourlyActivity,
 } = require('../services/analyticsQueries');
 const { buildWorkbook, workbookFilename } = require('../services/analyticsExport');
 
@@ -41,6 +42,11 @@ router.get('/agents',        handle('agents',        getAgentStats));
 // Leaderboard on the typed `resolved_by` name — covers all history, unlike
 // /agents which only sees activity recorded since attribution shipped.
 router.get('/resolved-by',   handle('resolved-by',   getResolvedByName));
+
+// Hour-of-day activity, bucketed in IST. Admin only — the other /agents routes
+// self-scope to the caller, but this one is a staff-hours view and there's no
+// useful version of it for an agent looking at a colleague.
+router.get('/hourly',        requireAdmin, handle('hourly', getHourlyActivity));
 
 // Most-used reply templates
 router.get('/templates', async (req, res) => {
