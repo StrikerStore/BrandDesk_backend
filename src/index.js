@@ -18,7 +18,7 @@ const authRoutes      = require('./routes/auth');
 const sendsRoutes     = require('./routes/sends');
 const { threadRouter: actionsRoutes, globalRouter: actionsGlobal } = require('./routes/actions');
 const payuWebhookRoutes = require('./routes/payuWebhook');
-const { syncThreads, syncFromHistory, seedHistoryId } = require('./services/gmail');
+const { syncThreads, syncFromHistory, seedHistoryId, getSyncHealth, resetHistoryBaseline } = require('./services/gmail');
 const { runAutoAck, runAutoResolve } = require('./services/automation');
 const { flushDueSends } = require('./services/sendQueue');
 const { reconcilePendingPaymentLinks } = require('./services/paymentLinks');
@@ -79,7 +79,20 @@ app.use(cookieParser());
 
 // ── Public routes ─────────────────────────────────────────────
 app.use('/api/users', usersRoutes); // login/logout are public; admin routes protected inside
-app.get('/health',    (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+// Liveness. Always 200 while the process is serving — a platform healthcheck
+// pointed here must not restart the container over a stalled mailbox.
+app.get('/health',    (req, res) => res.json({
+  status: 'ok', sync: getSyncHealth(), timestamp: new Date().toISOString(),
+}));
+
+// Is mail actually arriving? Point an uptime monitor at this, not /health.
+// The two are not the same: the server stayed up and answered every request
+// for two weeks while the Gmail history poll was wedged and every customer
+// reply was being dropped. 503 here means the inbox cannot be trusted.
+app.get('/health/sync', (req, res) => {
+  const sync = getSyncHealth();
+  res.status(sync.healthy ? 200 : 503).json({ ...sync, timestamp: new Date().toISOString() });
+});
 
 // ── Gmail OAuth ───────────────────────────────────────────────
 // /auth/google requires admin (inside route)
@@ -121,6 +134,21 @@ app.post('/api/sync', requireAuth, async (req, res) => {
   }
 });
 
+// Re-anchor the Gmail history watermark on the mailbox's current position.
+// The recovery path does this on its own now; this is the manual lever for
+// when the watermark is stuck but history.list is not failing, which is the
+// state that went unnoticed for two weeks. Run a full sync afterwards — this
+// skips forward, it does not backfill.
+app.post('/api/sync/reset-history', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const historyId = await resetHistoryBaseline();
+    res.json({ success: true, historyId });
+  } catch (err) {
+    console.error('History baseline reset failed:', err.message);
+    res.status(500).json({ error: 'Reset failed' });
+  }
+});
+
 // ── Global error handler ──────────────────────────────────────
 app.use((err, req, res, next) => {
   if (err.message?.startsWith('CORS')) {
@@ -144,12 +172,30 @@ setTimeout(async () => {
 // ── Cron jobs ─────────────────────────────────────────────────
 // Fast history poll every 15 seconds — lightweight API call
 let historyPollRunning = false;
+let lastStaleWarnAt = 0;
 setInterval(async () => {
   if (historyPollRunning) return;
   historyPollRunning = true;
   try { await syncFromHistory(); }
   catch (err) { if (!err.message?.includes('Not authenticated')) console.error('History sync error:', err.message); }
   finally { historyPollRunning = false; }
+
+  // Say it out loud when the watermark stops moving. A silent stall here looks
+  // exactly like a quiet inbox: new tickets keep arriving on the 5-minute
+  // sync, so nothing on screen suggests anything is wrong. That sync now also
+  // catches replies, so a stall is degradation rather than data loss — but it
+  // still means mail is minutes late instead of seconds, and it is the signal
+  // that the fast path has broken.
+  const health = getSyncHealth();
+  if (!health.healthy && Date.now() - lastStaleWarnAt > 10 * 60 * 1000) {
+    lastStaleWarnAt = Date.now();
+    console.error(
+      `❌ Gmail history sync unhealthy — watermark ${health.storedHistoryId} stale for ` +
+      `${health.watermarkStaleMinutes}m, ${health.consecutiveHistoryFailures} consecutive failure(s)` +
+      (health.lastHistoryError ? `: ${health.lastHistoryError}` : '') +
+      ' — customer replies are NOT being captured.'
+    );
+  }
 }, 15000);
 
 // Flush due recall-window sends every 10s. Each queued send also has its own

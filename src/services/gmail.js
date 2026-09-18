@@ -104,17 +104,56 @@ function stripQuoted(text) {
   return cutoff > 0 ? lines.slice(0, cutoff).join('\n').trim() : text.trim();
 }
 
-// Get the timestamp of the most recent thread activity per brand
-// Uses GREATEST of created_at and updated_at so threads with new replies
-// (which update updated_at) are always caught by the incremental sync.
+// How far back the incremental sync looks, in minutes. The window has to
+// absorb clock skew between Gmail and us plus anything a failed run missed;
+// Gmail volume here is tens of mails a day, so a wide window is cheap.
+const SYNC_LOOKBACK_MINUTES = parseInt(process.env.SYNC_LOOKBACK_MINUTES || '60');
+
+// Resume point for the incremental sync, as Unix epoch SECONDS.
+//
+// Anchored on the newest inbound mail we actually hold for the brand, not on
+// threads.updated_at. updated_at carries every local write — opening a ticket
+// clears is_unread, a status change, an order-id edit — so it tracked agent
+// activity rather than mail, and dragged the `after:` window forward past mail
+// that had not been fetched yet. A reply that landed in that gap fell outside
+// the window on the next run and was never looked at again.
+//
+// Returned as epoch seconds straight from MySQL. The old expression wrapped
+// the columns in GREATEST(..., 0), which collapsed the TIMESTAMPs to a string
+// and defeated the driver's date parsing; `new Date('2026-09-18 15:05:00')`
+// then parsed as LOCAL time, shifting the window by the server's UTC offset.
 async function getLastSyncTime(brandName) {
   const [rows] = await db.query(
-    'SELECT GREATEST(COALESCE(MAX(created_at), 0), COALESCE(MAX(updated_at), 0)) as last FROM threads WHERE brand = ?',
+    `SELECT UNIX_TIMESTAMP(MAX(m.sent_at)) AS last_epoch
+       FROM messages m
+       JOIN threads t ON t.id = m.thread_id
+      WHERE t.brand = ? AND m.direction = 'inbound'`,
     [brandName]
   );
-  const val = rows[0]?.last;
-  // GREATEST returns 0 when both are NULL (no threads exist)
-  return val && val !== '0' && val !== 0 ? val : null;
+  const epoch = Number(rows[0]?.last_epoch);
+  // NULL (no inbound mail for this brand yet) → caller does a full sync
+  return Number.isFinite(epoch) && epoch > 0 ? epoch : null;
+}
+
+// Page through threads.list for one query, up to `max` thread ids.
+async function listThreadIds(gmail, q, max) {
+  const ids = [];
+  let pageToken = undefined;
+
+  do {
+    const listRes = await gmail.users.threads.list({
+      userId: 'me',
+      q,
+      maxResults: Math.min(max - ids.length, 100),
+      ...(pageToken ? { pageToken } : {}),
+    });
+
+    ids.push(...(listRes.data.threads || []).map(t => t.id));
+    pageToken = listRes.data.nextPageToken;
+
+  } while (pageToken && ids.length < max);
+
+  return ids;
 }
 
 // Incremental sync — only fetch threads newer than what we already have
@@ -131,46 +170,56 @@ async function syncThreads(fullSync = false) {
   for (const brand of brands) {
     try {
       const lastSync = fullSync ? null : await getLastSyncTime(brand.name);
+      const after = lastSync ? ` after:${lastSync - SYNC_LOOKBACK_MINUTES * 60}` : '';
+      const maxToFetch = fullSync ? 500 : 100;
 
-      // Build Gmail query
-      let query = `label:${brand.label}`;
-      if (lastSync) {
-        // Gmail uses Unix epoch seconds for after: filter
-        // Subtract 5 min buffer to catch any emails that arrived during last sync
-        const epochSeconds = Math.floor(new Date(lastSync).getTime() / 1000) - 300;
-        query += ` after:${epochSeconds}`;
-      }
+      // Query 1 — the brand label. This is what opens new tickets.
+      //
+      // The label is quoted: real labels contain spaces ("Customer ticket/
+      // Dribble Ticket"), and unquoted those parse as separate search terms.
+      const labelled = await listThreadIds(
+        gmail, `label:${JSON.stringify(brand.label)}${after}`, maxToFetch
+      );
 
-      // Fetch threads — paginate to get up to 300 on full sync
-      const allThreadIds = [];
-      let pageToken = undefined;
-      const maxToFetch = fullSync ? 500 : 50;
+      // Query 2 — mail addressed to the brand, regardless of label.
+      //
+      // Gmail applies the ticket label via a filter on the Shopify form
+      // notification, so only the FIRST message of a thread carries it. A
+      // customer's reply arrives straight from their own address and is
+      // labelled INBOX/CATEGORY_PERSONAL and nothing else.
+      //
+      // `label:X after:T` needs ONE message to satisfy both halves, and no
+      // message ever does: the labelled one is too old, the recent one is
+      // unlabelled. So replies on existing tickets were invisible to this
+      // sync — new tickets kept arriving while every reply was dropped.
+      const addressed = await listThreadIds(
+        gmail, `(to:${brand.email} OR cc:${brand.email})${after}`, maxToFetch
+      );
 
-      do {
-        const listRes = await gmail.users.threads.list({
-          userId: 'me',
-          q: query,
-          maxResults: Math.min(maxToFetch - allThreadIds.length, 100),
-          ...(pageToken ? { pageToken } : {}),
-        });
+      const labelledSet = new Set(labelled);
+      const threadIds = [...labelled, ...addressed.filter(id => !labelledSet.has(id))];
+      if (threadIds.length === 0) continue;
 
-        const batch = listRes.data.threads || [];
-        allThreadIds.push(...batch);
-        pageToken = listRes.data.nextPageToken;
+      console.log(`📥 ${brand.name}: ${labelled.length} labelled + ${threadIds.length - labelled.length} addressed`);
 
-      } while (pageToken && allThreadIds.length < maxToFetch);
-
-      if (allThreadIds.length === 0) continue;
-
-      console.log(`📥 ${brand.name}: fetching ${allThreadIds.length} threads...`);
-
-      for (const t of allThreadIds) {
+      for (const gmailThreadId of threadIds) {
         const [existing] = await db.query(
-          'SELECT id FROM threads WHERE gmail_thread_id = ?',
-          [t.id]
+          'SELECT id, brand FROM threads WHERE gmail_thread_id = ?',
+          [gmailThreadId]
         );
         const isNew = existing.length === 0;
-        await processThread(gmail, t.id, brand);
+
+        // Query 2 is deliberately broad, so it must not open tickets on its
+        // own — anything reaching a brand address would become one. It only
+        // tops up threads we already track. New tickets still come from the
+        // label, which is what decides a mail is a ticket in the first place.
+        if (isNew && !labelledSet.has(gmailThreadId)) continue;
+
+        // A thread can match another brand's address (an agent looped one in).
+        // Processing it under this brand would rewrite the wrong ticket.
+        if (!isNew && existing[0].brand !== brand.name) continue;
+
+        await processThread(gmail, gmailThreadId, brand);
         if (isNew) newThreads++;
         else updatedThreads++;
       }
@@ -561,13 +610,61 @@ async function sendInitialEmail(customerEmail, subject, body, brand, ticketId) {
 
 // ── Gmail Push Notifications (Pub/Sub) ───────────────────────
 
+// Why this is tracked: the history watermark silently stopped advancing and
+// stayed stuck for two weeks. The poll kept running, every failure went to
+// console.error, and nothing downstream noticed — new tickets still arrived
+// via the 5-minute label sync, so the tool looked healthy while every customer
+// reply was being dropped. /health reads this so a stuck poll is visible.
+const syncHealth = {
+  lastHistorySyncAt: null,
+  lastHistoryOkAt: null,
+  lastHistoryError: null,
+  consecutiveHistoryFailures: 0,
+  lastWatermarkAdvanceAt: null,
+  storedHistoryId: null,
+};
+
+function getSyncHealth() {
+  const staleMs = syncHealth.lastWatermarkAdvanceAt
+    ? Date.now() - syncHealth.lastWatermarkAdvanceAt
+    : null;
+  return {
+    ...syncHealth,
+    watermarkStaleMinutes: staleMs === null ? null : Math.round(staleMs / 60000),
+    // The poll runs every 15s. Nothing advancing for 30 minutes means it is
+    // wedged, not quiet — history.list returns the mailbox's current id on
+    // every call, so the watermark moves even when no mail arrived.
+    healthy: syncHealth.consecutiveHistoryFailures === 0 &&
+             (staleMs === null || staleMs < 30 * 60 * 1000),
+  };
+}
+
 async function getStoredHistoryId() {
   const [rows] = await db.query('SELECT history_id FROM auth_tokens LIMIT 1');
   return rows[0]?.history_id || null;
 }
 
 async function saveHistoryId(historyId) {
-  await db.query('UPDATE auth_tokens SET history_id = ?', [historyId]);
+  const [res] = await db.query('UPDATE auth_tokens SET history_id = ?', [historyId]);
+  // No row means there is no token record to hang the watermark on, so the
+  // next poll re-reads the same stale id and the sync never moves forward.
+  if (!res.affectedRows) throw new Error('saveHistoryId: no auth_tokens row to update');
+  syncHealth.storedHistoryId = String(historyId);
+  syncHealth.lastWatermarkAdvanceAt = Date.now();
+}
+
+/**
+ * Re-anchor the watermark on the mailbox's current historyId. Used whenever
+ * the stored one can no longer be resumed from.
+ */
+async function resetHistoryBaseline() {
+  const auth = await getAuthenticatedClient();
+  const gmail = google.gmail({ version: 'v1', auth });
+  const profile = await gmail.users.getProfile({ userId: 'me' });
+  if (!profile.data.historyId) throw new Error('profile returned no historyId');
+  await saveHistoryId(profile.data.historyId);
+  console.log(`📡 History baseline reset to ${profile.data.historyId}`);
+  return profile.data.historyId;
 }
 
 /**
@@ -651,7 +748,9 @@ async function handlePushNotification(pubsubMessage) {
  * Much faster than full thread listing — processes only affected threads.
  */
 async function syncFromHistory(triggerHistoryId) {
+  syncHealth.lastHistorySyncAt = Date.now();
   const startHistoryId = await getStoredHistoryId();
+  syncHealth.storedHistoryId = startHistoryId === null ? null : String(startHistoryId);
   if (!startHistoryId) {
     // No history baseline — fall back to regular sync
     console.log('📥 No history baseline, falling back to full sync');
@@ -695,13 +794,17 @@ async function syncFromHistory(triggerHistoryId) {
       pageToken = res.data.nextPageToken;
     } while (pageToken);
 
-    // Always advance the history ID even if no changes
+    // The watermark is NOT advanced here — see the end of this function.
+    // Advancing before the threads are processed meant a crash mid-loop
+    // discarded those messages permanently: the next poll resumed past them,
+    // and the label sync could not see an unlabelled reply either.
     const newHistoryId = triggerHistoryId || latestHistoryId;
-    if (newHistoryId !== startHistoryId) {
-      await saveHistoryId(newHistoryId);
-    }
 
     if (changedThreadIds.size === 0) {
+      if (String(newHistoryId) !== String(startHistoryId)) await saveHistoryId(newHistoryId);
+      syncHealth.lastHistoryOkAt = Date.now();
+      syncHealth.consecutiveHistoryFailures = 0;
+      syncHealth.lastHistoryError = null;
       return { newThreads: 0, updatedThreads: 0, total: 0 };
     }
 
@@ -726,6 +829,7 @@ async function syncFromHistory(triggerHistoryId) {
 
     let newThreads = 0;
     let updatedThreads = 0;
+    let failed = 0;
 
     for (const threadId of changedThreadIds) {
       try {
@@ -759,33 +863,63 @@ async function syncFromHistory(triggerHistoryId) {
         if (isNew) newThreads++;
         else updatedThreads++;
       } catch (err) {
+        failed++;
         console.error(`Push sync error for thread ${threadId}:`, err.message);
       }
     }
+
+    // Advanced only now, once the batch has been handled. A thread that threw
+    // is still passed over rather than retried forever — one permanently bad
+    // thread must not wedge the whole mailbox — but it is counted and logged
+    // loudly, because a reply lost here has no other path into the tool.
+    if (failed) console.error(`⚠ History sync: ${failed} thread(s) failed and were skipped`);
+    if (String(newHistoryId) !== String(startHistoryId)) await saveHistoryId(newHistoryId);
+    syncHealth.lastHistoryOkAt = Date.now();
+    syncHealth.consecutiveHistoryFailures = 0;
+    syncHealth.lastHistoryError = null;
 
     const summary = `📡 History sync complete — ${newThreads} new, ${updatedThreads} updated`;
     console.log(summary);
     return { newThreads, updatedThreads, total: newThreads + updatedThreads };
 
   } catch (err) {
-    if (err.code === 404 || err.message?.includes('notFound')) {
-      // historyId too old — Gmail purged it, fall back to regular sync
-      console.log('📥 History expired, falling back to regular sync');
-      const result = await syncThreads(false);
-      // Reset history baseline via profile
+    syncHealth.consecutiveHistoryFailures++;
+    syncHealth.lastHistoryError = err.message;
+
+    // Cover the gap first, whatever went wrong. Only then decide about the
+    // watermark — re-anchoring skips to the mailbox's current position, so it
+    // is safe only once the window it skips has been swept by syncThreads.
+    console.error(`📥 History sync failed (${err.message}) — falling back to label/address sync`);
+    const result = await syncThreads(false);
+
+    // Detection is deliberately wider than the old `err.code === 404 ||
+    // message.includes('notFound')`: a googleapis error reporting its status
+    // another way slipped past that check and rethrew, so the baseline was
+    // never re-anchored and every later poll failed identically. It is still
+    // not unconditional — re-anchoring on a transient network blip would jump
+    // the watermark past history we have not read. Repeated failures count as
+    // expiry regardless, since that is what a permanently unusable id looks
+    // like from here.
+    const status = err.code ?? err.response?.status;
+    const looksExpired = status === 404 || status === 400 ||
+      /notFound|startHistoryId|Invalid/i.test(err.message || '');
+
+    if (looksExpired || syncHealth.consecutiveHistoryFailures >= 5) {
       try {
-        const auth = await getAuthenticatedClient();
-        const gmail = google.gmail({ version: 'v1', auth });
-        const profile = await gmail.users.getProfile({ userId: 'me' });
-        if (profile.data.historyId) await saveHistoryId(profile.data.historyId);
-      } catch {}
-      return result;
+        await resetHistoryBaseline();
+        syncHealth.consecutiveHistoryFailures = 0;
+      } catch (resetErr) {
+        // Swallowing this is what let the watermark stay frozen. With the
+        // reset failing AND silent, the poll was a no-op forever.
+        console.error(`❌ Could not reset history baseline: ${resetErr.message}`);
+      }
     }
-    throw err;
+    return result;
   }
 }
 
 module.exports = {
   getAuthUrl, getAndClearOAuthState, getAuthenticatedClient, syncThreads, sendReply, sendInitialEmail, createOAuthClient,
   watchMailbox, handlePushNotification, syncFromHistory, seedHistoryId,
+  getSyncHealth, resetHistoryBaseline,
 };
